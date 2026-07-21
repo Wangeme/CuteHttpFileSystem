@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chfs"
+version = "0.1.0"
+description = "简便、安全、可扩展的 HTTP 文件传输服务器"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "starlette>=0.45,<1.0",
+    "uvicorn>=0.34,<1.0",
+]
+
+[project.scripts]
+chfs = "chfs.cli:main"
+chfs-gui = "chfs.gui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+chfs = ["web/*.html", "web/*.css", "web/*.js"]

@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-07-21T14:06:19.168830+00:00",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.14.6",
+  "size_bytes": 268435456,
+  "size_mib": 256,
+  "chunk_bytes": 8388608,
+  "upload_seconds": 1.8266,
+  "upload_mib_per_second": 140.15,
+  "download_seconds": 0.8295,
+  "download_mib_per_second": 308.63,
+  "upload_sha256_verified": true,
+  "download_sha256_verified": true,
+  "range_resume_verified": true,
+  "sha256": "f17d53b0a0d7968b33c22c7f941c8691c041be00dd5889f5be4998341927be9d",
+  "result": "passed",
+  "note": "环回结果用于发现应用层瓶颈，不等同于真实局域网物理带宽。"
+}

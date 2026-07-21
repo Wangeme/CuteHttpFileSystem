@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>CHFS 文件空间</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="CHFS 首页">
+        <span class="brand-mark" aria-hidden="true">C</span>
+        <span><strong>CHFS</strong><small>文件空间</small></span>
+      </a>
+      <div class="session-area">
+        <span id="connectionState" class="connection"><span class="status-dot"></span>服务在线</span>
+        <button id="loginButton" class="button button-quiet" type="button">登录</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="heading-row">
+        <div>
+          <p class="eyebrow">共享目录</p>
+          <h1>文件</h1>
+          <nav id="breadcrumbs" class="breadcrumbs" aria-label="当前位置"></nav>
+        </div>
+        <div class="primary-actions">
+          <input id="filePicker" type="file" multiple hidden>
+          <button id="newFolderButton" class="button button-secondary" type="button">新建文件夹</button>
+          <button id="uploadButton" class="button button-primary" type="button">上传文件</button>
+        </div>
+      </section>
+
+      <section id="dropZone" class="file-panel" aria-live="polite">
+        <div class="file-toolbar">
+          <div id="itemCount" class="item-count">正在读取…</div>
+          <button id="refreshButton" class="button button-quiet" type="button">刷新</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th><span class="sr-only">操作</span></th></tr></thead>
+            <tbody id="fileRows"></tbody>
+          </table>
+        </div>
+        <div id="emptyState" class="empty-state" hidden>
+          <strong>这个文件夹是空的</strong>
+          <span>拖放文件到这里，或使用“上传文件”。</span>
+        </div>
+        <div id="loadingState" class="loading-state">正在加载文件…</div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="loginDialog" class="dialog">
+    <form id="loginForm" method="dialog">
+      <div class="dialog-heading"><div><p class="eyebrow">账户访问</p><h2>登录 CHFS</h2></div><button class="close-button" value="cancel" aria-label="关闭" type="submit">关闭</button></div>
+      <label>用户名<input id="usernameInput" name="username" autocomplete="username" required></label>
+      <label>密码<input id="passwordInput" name="password" type="password" autocomplete="current-password" required></label>
+      <p id="loginError" class="form-error" role="alert"></p>
+      <button class="button button-primary button-full" value="default" type="submit">登录</button>
+    </form>
+  </dialog>
+
+  <dialog id="folderDialog" class="dialog">
+    <form id="folderForm" method="dialog">
+      <div class="dialog-heading"><div><p class="eyebrow">新建目录</p><h2>创建文件夹</h2></div><button class="close-button" value="cancel" aria-label="关闭" type="submit">关闭</button></div>
+      <label>文件夹名称<input id="folderNameInput" autocomplete="off" maxlength="120" required></label>
+      <p id="folderError" class="form-error" role="alert"></p>
+      <button class="button button-primary button-full" value="default" type="submit">创建</button>
+    </form>
+  </dialog>
+
+  <div id="uploadTray" class="upload-tray" hidden>
+    <div><strong id="uploadTitle">正在上传</strong><span id="uploadDetail"></span></div>
+    <progress id="uploadProgress" value="0" max="100"></progress>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/assets/app.js" type="module"></script>
+</body>
+</html>

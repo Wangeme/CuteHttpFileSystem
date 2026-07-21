@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# 本地运行时配置和数据
+config.json
+logs/
+shared/
+
+# 构建输出
+build/
+dist/
+
+# 自动化截图和基准产物保留在本地，不进入发行包
+artifacts/*.log
+artifacts/*.pid

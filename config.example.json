@@ -1,0 +1,18 @@
+{
+  "share_root": "shared",
+  "host": "0.0.0.0",
+  "port": 8080,
+  "max_upload_bytes": 1099511627776,
+  "session_ttl_seconds": 28800,
+  "audit_log": "logs/audit.jsonl",
+  "tls_certificate": null,
+  "tls_private_key": null,
+  "guest_permissions": [
+    "delete",
+    "read",
+    "write"
+  ],
+  "allow_networks": [],
+  "deny_networks": [],
+  "accounts": []
+}

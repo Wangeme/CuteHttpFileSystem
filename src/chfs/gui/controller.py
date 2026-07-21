@@ -1,0 +1,115 @@
+"""桌面界面使用的服务生命周期控制器。"""
+
+from __future__ import annotations
+
+import socket
+import threading
+from collections.abc import Callable
+
+import uvicorn
+
+from ..config import AppConfig
+from ..http import create_app
+
+
+class ServerController:
+    """在线程中启停单个 Uvicorn 实例。
+
+    GUI 只通过该对象控制服务，不直接访问 Uvicorn 内部状态，便于测试并避免
+    主线程被网络事件循环阻塞。
+    """
+
+    def __init__(self, on_state_change: Callable[[str], None] | None = None) -> None:
+        self._server: uvicorn.Server | None = None
+        self._thread: threading.Thread | None = None
+        self._lock = threading.RLock()
+        self._on_state_change = on_state_change or (lambda _state: None)
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            if self._thread is None:
+                return "stopped"
+            if self._server and self._server.started and self._thread.is_alive():
+                return "running"
+            if self._thread.is_alive():
+                return "starting"
+            return "stopped"
+
+    def start(self, config: AppConfig) -> bool:
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return False
+            config.share_root.mkdir(parents=True, exist_ok=True)
+            self._server = uvicorn.Server(
+                uvicorn.Config(
+                    create_app(config),
+                    host=config.host,
+                    port=config.port,
+                    log_level="info",
+                    access_log=True,
+                    ssl_certfile=str(config.tls_certificate) if config.tls_certificate else None,
+                    ssl_keyfile=str(config.tls_private_key) if config.tls_private_key else None,
+                )
+            )
+            self._thread = threading.Thread(
+                target=self._run,
+                args=(self._server,),
+                name="chfs-http-server",
+                daemon=True,
+            )
+            self._thread.start()
+        self._on_state_change("starting")
+        return True
+
+    def _run(self, server: uvicorn.Server) -> None:
+        try:
+            server.run()
+        finally:
+            self._on_state_change("stopped")
+
+    def stop(self, timeout: float = 5.0) -> bool:
+        with self._lock:
+            if not self._server or not self._thread or not self._thread.is_alive():
+                return False
+            server = self._server
+            thread = self._thread
+            server.should_exit = True
+        self._on_state_change("stopping")
+        thread.join(timeout=timeout)
+        return not thread.is_alive()
+
+    def wait_until_started(self, timeout: float = 5.0) -> bool:
+        """供测试和 GUI 状态轮询使用，不阻塞无限时间。"""
+
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.state == "running":
+                return True
+            if self._thread is not None and not self._thread.is_alive():
+                return False
+            time.sleep(0.02)
+        return False
+
+
+def discover_urls(host: str, port: int, *, https: bool = False) -> list[str]:
+    """根据监听地址生成可复制的访问地址，过滤无用和重复结果。"""
+
+    if host not in {"0.0.0.0", "::"}:
+        display_host = f"[{host}]" if ":" in host else host
+        return [f"{'https' if https else 'http'}://{display_host}:{port}"]
+    addresses = {"127.0.0.1"}
+    try:
+        for item in socket.getaddrinfo(socket.gethostname(), None):
+            address = item[4][0]
+            if not address.startswith("127.") and address != "::1" and "%" not in address:
+                addresses.add(address)
+    except OSError:
+        pass
+    result = []
+    for address in sorted(addresses, key=lambda value: (value != "127.0.0.1", value)):
+        display = f"[{address}]" if ":" in address else address
+        result.append(f"{'https' if https else 'http'}://{display}:{port}")
+    return result
