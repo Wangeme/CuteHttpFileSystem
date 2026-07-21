@@ -46,8 +46,9 @@ class HttpIntegrationTests(unittest.TestCase):
             },
             base_dir=cls.base,
         )
+        cls.application = create_app(config)
         cls.server = uvicorn.Server(
-            uvicorn.Config(create_app(config), host="127.0.0.1", port=cls.port, log_level="error")
+            uvicorn.Config(cls.application, host="127.0.0.1", port=cls.port, log_level="error")
         )
         cls.thread = threading.Thread(target=cls.server.run, daemon=True)
         cls.thread.start()
@@ -102,7 +103,11 @@ class HttpIntegrationTests(unittest.TestCase):
     def test_web_interface_and_static_assets_are_served(self) -> None:
         status, body, headers = self.request("GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn("CHFS 文件空间", body.decode("utf-8"))
+        html = body.decode("utf-8")
+        self.assertIn("CHFS 文件空间", html)
+        self.assertIn('type="file" multiple', html)
+        self.assertIn('id="uploadSpeed"', html)
+        self.assertIn('id="uploadOverallProgress"', html)
         normalized = {key.casefold(): value for key, value in headers.items()}
         self.assertIn("default-src 'self'", normalized["content-security-policy"])
         status, body, _ = self.request("GET", "/assets/app.js")
@@ -207,6 +212,9 @@ class HttpIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(status, 200)
             offset = json.loads(body)["offset"]
+            upload_snapshots = self.application.state.runtime.uploads.snapshots()
+            self.assertEqual(upload_snapshots[0]["source"], "127.0.0.1")
+            self.assertEqual(upload_snapshots[0]["transferred_bytes"], offset)
         complete_body = json.dumps({"manifest_sha256": hashlib.sha256(b"".join(digests)).hexdigest()}).encode()
         status, body, _ = self.request(
             "POST",
@@ -227,6 +235,8 @@ class HttpIntegrationTests(unittest.TestCase):
         self.assertEqual(body, content[6:15])
         normalized = {key.casefold(): value for key, value in headers.items()}
         self.assertEqual(normalized["accept-ranges"], "bytes")
+        completed_downloads = self.application.state.runtime.transfers.snapshots()
+        self.assertTrue(any(item["path"] == "resumable.bin" for item in completed_downloads))
 
 
 class DownloadCookieSecurityTests(unittest.TestCase):

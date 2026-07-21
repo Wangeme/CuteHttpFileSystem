@@ -22,6 +22,7 @@ from .models import Principal
 from .paths import SafePathResolver
 from .security import NetworkPolicy, SessionManager
 from .services import FileService
+from .transfers import TransferRegistry
 from .uploads import ResumableUploadManager
 
 LOGGER = logging.getLogger(__name__)
@@ -36,6 +37,57 @@ class Runtime:
     network: NetworkPolicy
     audit: AuditLogger
     uploads: ResumableUploadManager
+    transfers: TransferRegistry
+
+
+class TrackedFileResponse(FileResponse):
+    """在不改变 FileResponse/Range 行为的前提下统计实际发送字节。"""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        registry: TransferRegistry,
+        public_path: str,
+        owner: str,
+        source: str,
+    ) -> None:
+        super().__init__(path, filename=path.name)
+        self.registry = registry
+        self.public_path = public_path
+        self.owner = owner
+        self.source = source
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        transfer_id: str | None = None
+        completed = False
+
+        async def tracked_send(message: dict[str, Any]) -> None:
+            nonlocal transfer_id, completed
+            if message["type"] == "http.response.start" and int(message.get("status", 0)) in {200, 206}:
+                headers = {key.lower(): value for key, value in message.get("headers", [])}
+                try:
+                    total = int(headers.get(b"content-length", b"0"))
+                except ValueError:
+                    total = 0
+                transfer_id = self.registry.start_download(
+                    self.public_path,
+                    self.owner,
+                    self.source,
+                    total,
+                )
+            elif message["type"] == "http.response.body" and transfer_id is not None:
+                self.registry.advance(transfer_id, len(message.get("body", b"")))
+                if not message.get("more_body", False):
+                    completed = True
+                    self.registry.finish(transfer_id)
+            await send(message)
+
+        try:
+            await super().__call__(scope, receive, tracked_send)
+        finally:
+            if transfer_id is not None and not completed:
+                self.registry.finish(transfer_id, failed=True)
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
@@ -80,6 +132,7 @@ def create_app(config: AppConfig) -> Starlette:
         network=NetworkPolicy(config.allow_networks, config.deny_networks),
         audit=AuditLogger(config.audit_log),
         uploads=ResumableUploadManager(resolver, config.max_upload_bytes),
+        transfers=TransferRegistry(),
     )
     routes = [
         Route("/", web_index, methods=["GET"]),
@@ -200,7 +253,13 @@ async def content(request: Request) -> Response:
                 principal = runtime.sessions.resolve(cookie_token)
         path = runtime.files.open_download(principal, user_path)
         runtime.audit.record("file.download", actor=principal.name, source=_source(request), success=True, path=user_path)
-        return FileResponse(path, filename=path.name)
+        return TrackedFileResponse(
+            path,
+            registry=runtime.transfers,
+            public_path=user_path.replace("\\", "/"),
+            owner=principal.name,
+            source=_source(request),
+        )
     overwrite = _boolean_query(request, "overwrite", False)
     length_text = request.headers.get("content-length")
     if length_text:
@@ -254,6 +313,7 @@ async def create_resumable_upload(request: Request) -> JSONResponse:
         expected_size,
         resume_key,
         overwrite=overwrite,
+        source=_source(request),
     )
     runtime.audit.record(
         "upload.create",

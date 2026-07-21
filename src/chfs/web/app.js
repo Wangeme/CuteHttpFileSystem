@@ -27,8 +27,12 @@ const elements = {
   dropZone: document.querySelector("#dropZone"),
   tray: document.querySelector("#uploadTray"),
   progress: document.querySelector("#uploadProgress"),
+  overallProgress: document.querySelector("#uploadOverallProgress"),
+  overallText: document.querySelector("#uploadOverallText"),
   uploadTitle: document.querySelector("#uploadTitle"),
   uploadDetail: document.querySelector("#uploadDetail"),
+  uploadCounter: document.querySelector("#uploadCounter"),
+  uploadSpeed: document.querySelector("#uploadSpeed"),
   toast: document.querySelector("#toast"),
   uploadButton: document.querySelector("#uploadButton"),
   newFolderButton: document.querySelector("#newFolderButton"),
@@ -189,21 +193,31 @@ async function removeEntry(entry) {
 
 async function uploadFiles(files) {
   if (!can("write")) { toast(state.authenticationAvailable ? "当前身份没有上传权限，请先登录" : "服务端未开放上传权限", true); return; }
-  for (const file of files) {
+  const batch = {
+    count: files.length,
+    totalBytes: files.reduce((total, file) => total + file.size, 0),
+    completedBytes: 0,
+    networkBytes: 0,
+    lastSpeedBytes: 0,
+    lastSpeedTime: performance.now(),
+    speed: 0,
+  };
+  elements.tray.hidden = false;
+  for (const [index, file] of files.entries()) {
     const path = joinPath(file.name);
-    try { await uploadOne(file, path); }
+    try { await uploadOne(file, path, batch, index); }
     catch (error) { toast(`${file.name}：${error.message}`, true); elements.tray.hidden = true; return; }
+    batch.completedBytes += file.size;
   }
+  updateUploadDisplay(batch, files.at(-1), files.length - 1, files.at(-1)?.size || 0, "上传完成");
+  await new Promise(resolve => setTimeout(resolve, 650));
   elements.tray.hidden = true;
   toast(`已上传 ${files.length} 个文件`);
   await loadFiles();
 }
 
-async function uploadOne(file, path) {
-  elements.tray.hidden = false;
-  elements.uploadTitle.textContent = "准备上传";
-  elements.uploadDetail.textContent = file.name;
-  elements.progress.value = 0;
+async function uploadOne(file, path, batch, index) {
+  updateUploadDisplay(batch, file, index, 0, "准备上传");
 
   const storageKey = `chfs-resume:${path}:${file.size}:${file.lastModified}`;
   let resumeKey = localStorage.getItem(storageKey);
@@ -221,11 +235,11 @@ async function uploadOne(file, path) {
 
   // 续传时重新读取本地前缀并核对分块清单，防止同名同大小但内容不同的文件混接。
   if (session.offset > 0) {
-    elements.uploadTitle.textContent = "验证续传点";
+    updateUploadDisplay(batch, file, index, 0, "验证续传点");
     for (let position = 0; position < session.offset; position += chunkSize) {
       const digest = await hashBytes(await file.slice(position, Math.min(position + chunkSize, session.offset)).arrayBuffer());
       chunkDigests.push(digest);
-      elements.progress.value = Math.round((Math.min(position + chunkSize, session.offset) / file.size) * 100);
+      updateUploadDisplay(batch, file, index, Math.min(position + chunkSize, session.offset), "验证续传点");
     }
     const prefixManifest = toHex(await hashBytes(concatenateBytes(chunkDigests)));
     if (prefixManifest !== session.prefix_manifest_sha256) {
@@ -240,11 +254,22 @@ async function uploadOne(file, path) {
     const bytes = await file.slice(position, end).arrayBuffer();
     const digest = await hashBytes(bytes);
     chunkDigests.push(digest);
-    elements.uploadTitle.textContent = "校验并上传";
-    session = await sendChunkWithRetry(session.upload_id, position, bytes, toHex(digest), file.size);
+    updateUploadDisplay(batch, file, index, position, "校验并上传");
+    session = await sendChunkWithRetry(
+      session.upload_id,
+      position,
+      bytes,
+      toHex(digest),
+      file.size,
+      (loaded, networkDelta) => {
+        batch.networkBytes += networkDelta;
+        updateUploadDisplay(batch, file, index, position + loaded, "正在上传");
+      },
+    );
+    updateUploadDisplay(batch, file, index, session.offset, "分块已校验");
   }
   const manifest = toHex(await hashBytes(concatenateBytes(chunkDigests)));
-  elements.uploadTitle.textContent = "正在原子提交";
+  updateUploadDisplay(batch, file, index, file.size, "正在原子提交");
   const completed = await api(`/api/v1/uploads/${encode(session.upload_id)}/complete`, {
     method: "POST",
     json: true,
@@ -255,10 +280,10 @@ async function uploadOne(file, path) {
   elements.progress.value = 100;
 }
 
-async function sendChunkWithRetry(uploadId, offset, bytes, digest, totalSize) {
+async function sendChunkWithRetry(uploadId, offset, bytes, digest, totalSize, onProgress) {
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try { return await sendChunk(uploadId, offset, bytes, digest, totalSize); }
+    try { return await sendChunk(uploadId, offset, bytes, digest, totalSize, onProgress); }
     catch (error) {
       lastError = error;
       if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 350 * attempt));
@@ -267,14 +292,19 @@ async function sendChunkWithRetry(uploadId, offset, bytes, digest, totalSize) {
   throw lastError;
 }
 
-function sendChunk(uploadId, offset, bytes, digest, totalSize) {
+function sendChunk(uploadId, offset, bytes, digest, totalSize, onProgress) {
   return new Promise((resolve, reject) => {
+    let lastLoaded = 0;
     const xhr = new XMLHttpRequest();
     xhr.open("PATCH", `/api/v1/uploads/${encode(uploadId)}?offset=${offset}`);
     xhr.setRequestHeader("X-CHFS-Chunk-SHA256", digest);
     if (state.token) xhr.setRequestHeader("Authorization", `Bearer ${state.token}`);
     xhr.upload.addEventListener("progress", event => {
-      if (event.lengthComputable) elements.progress.value = Math.round(((offset + event.loaded) / totalSize) * 100);
+      if (event.lengthComputable) {
+        const delta = Math.max(0, event.loaded - lastLoaded);
+        lastLoaded = event.loaded;
+        onProgress(event.loaded, delta);
+      }
     });
     xhr.addEventListener("load", () => {
       if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText));
@@ -286,6 +316,29 @@ function sendChunk(uploadId, offset, bytes, digest, totalSize) {
     xhr.addEventListener("error", () => reject(new Error("网络连接中断，正在重试")));
     xhr.send(bytes);
   });
+}
+
+function updateUploadDisplay(batch, file, index, fileLoaded, phase) {
+  const now = performance.now();
+  const elapsed = now - batch.lastSpeedTime;
+  if (elapsed >= 250) {
+    const delta = batch.networkBytes - batch.lastSpeedBytes;
+    const currentSpeed = delta / (elapsed / 1000);
+    batch.speed = batch.speed === 0 ? currentSpeed : batch.speed * 0.65 + currentSpeed * 0.35;
+    batch.lastSpeedBytes = batch.networkBytes;
+    batch.lastSpeedTime = now;
+  }
+  const currentTotal = file?.size || 0;
+  const currentPercent = currentTotal === 0 ? 100 : Math.min(100, Math.round(fileLoaded * 100 / currentTotal));
+  const overallLoaded = batch.completedBytes + fileLoaded;
+  const overallPercent = batch.totalBytes === 0 ? 100 : Math.min(100, Math.round(overallLoaded * 100 / batch.totalBytes));
+  elements.uploadTitle.textContent = phase;
+  elements.uploadCounter.textContent = `${index + 1} / ${batch.count}`;
+  elements.uploadDetail.textContent = `${file?.name || "文件"} · ${formatBytes(fileLoaded)} / ${formatBytes(currentTotal)}`;
+  elements.uploadSpeed.textContent = `${formatBytes(batch.speed)}/s`;
+  elements.progress.value = currentPercent;
+  elements.overallProgress.value = overallPercent;
+  elements.overallText.textContent = `${overallPercent}%`;
 }
 
 

@@ -11,8 +11,11 @@ import ctypes
 import json
 import os
 import queue
+import threading
 import webbrowser
 from pathlib import Path
+
+import qrcode
 
 # Windows 默认会对未声明 DPI 感知的 Tk 窗口做位图拉伸，导致文字模糊、窗口尺寸
 # 与屏幕物理像素不一致。必须在导入并初始化 tkinter 之前声明系统 DPI 感知。
@@ -90,7 +93,7 @@ class CHFSApplication(tk.Tk):
         self.read_var = tk.BooleanVar(value=Permission.READ in self.config.guest_permissions)
         self.write_var = tk.BooleanVar(value=Permission.WRITE in self.config.guest_permissions)
         self.delete_var = tk.BooleanVar(value=Permission.DELETE in self.config.guest_permissions)
-        self.status_var = tk.StringVar(value="已停止")
+        self.status_var = tk.StringVar(value="已关闭")
         self.status_detail_var = tk.StringVar(value="配置就绪，启动后即可在浏览器访问")
 
     def _configure_styles(self) -> None:
@@ -140,6 +143,7 @@ class CHFSApplication(tk.Tk):
             ("overview", "运行概览"),
             ("share", "共享与权限"),
             ("network", "网络与访问"),
+            ("transfers", "传输会话"),
             ("accounts", "账户管理"),
             ("security", "安全状态"),
             ("logs", "操作日志"),
@@ -156,6 +160,10 @@ class CHFSApplication(tk.Tk):
 
     def show_page(self, page: str) -> None:
         self._active_page = page
+        if page != "transfers":
+            self.transfer_tree = None
+        if page != "overview":
+            self.toggle_button = None
         for key, button in self.nav_buttons.items():
             button.configure(style="ActiveNav.TButton" if key == page else "Nav.TButton")
         for child in self.content.winfo_children():
@@ -164,6 +172,7 @@ class CHFSApplication(tk.Tk):
             "overview": self._build_overview,
             "share": self._build_share,
             "network": self._build_network,
+            "transfers": self._build_transfers,
             "accounts": self._build_accounts,
             "security": self._build_security,
             "logs": self._build_logs,
@@ -207,17 +216,60 @@ class CHFSApplication(tk.Tk):
 
         addresses = self._surface(self.content, fill="both", expand=True)
         ttk.Label(addresses, text="访问地址", style="Surface.TLabel", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
-        ttk.Label(addresses, text="启动后，可复制下列地址到手机或其他电脑。", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 15))
-        for url in discover_urls(
+        ttk.Label(addresses, text="悬停地址可显示二维码；手机扫码即可打开。", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 12))
+        urls = discover_urls(
             self.host_var.get(),
             self._safe_int(self.port_var.get(), 8080),
             https=bool(self.tls_cert_var.get() and self.tls_key_var.get()),
-        ):
-            row = ttk.Frame(addresses, style="Surface.TFrame")
-            row.pack(fill="x", pady=5)
-            ttk.Label(row, text=url, style="Surface.TLabel", font=("Cascadia Mono", 10)).pack(side="left", fill="x", expand=True)
+        )
+        body = ttk.Frame(addresses, style="Surface.TFrame")
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        list_host = ttk.Frame(body, style="Surface.TFrame")
+        list_host.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        list_host.columnconfigure(0, weight=1)
+        list_host.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(list_host, bg=SURFACE, highlightthickness=0, height=205)
+        scrollbar = ttk.Scrollbar(list_host, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        address_list = ttk.Frame(canvas, style="Surface.TFrame")
+        window_id = canvas.create_window((0, 0), window=address_list, anchor="nw")
+        address_list.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+        canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"))
+
+        body.columnconfigure(1, minsize=190)
+        qr_panel = ttk.Frame(body, style="Surface.TFrame", width=190)
+        qr_panel.grid(row=0, column=1, sticky="ne")
+        ttk.Label(qr_panel, text="扫码访问", style="CardTitle.TLabel").pack(anchor="center", pady=(0, 7))
+        self.qr_label = tk.Label(qr_panel, bg="#ffffff", bd=0)
+        self.qr_label.pack(anchor="center")
+
+        for url in urls:
+            row = ttk.Frame(address_list, style="Surface.TFrame", padding=(0, 3))
+            row.pack(fill="x")
+            url_label = tk.Label(
+                row,
+                text=url,
+                bg=SURFACE,
+                fg=TEXT,
+                font=("Cascadia Mono", 9),
+                anchor="w",
+                justify="left",
+                wraplength=360,
+            )
+            url_label.pack(side="left", fill="x", expand=True)
             ttk.Button(row, text="复制", style="Secondary.TButton", command=lambda value=url: self._copy(value)).pack(side="right")
-            ttk.Button(row, text="打开", style="Secondary.TButton", command=lambda value=url: webbrowser.open(value)).pack(side="right", padx=8)
+            ttk.Button(row, text="打开", style="Secondary.TButton", command=lambda value=url: webbrowser.open(value)).pack(side="right", padx=6)
+            row.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
+            url_label.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
+        if urls:
+            preferred = next((item for item in urls if "192.168." in item or "10." in item or "172." in item), urls[0])
+            self._show_qr(preferred)
 
     def _build_share(self) -> None:
         self._page_header("共享与权限", "设置可访问目录、上传限制和访客默认能力")
@@ -258,6 +310,34 @@ class CHFSApplication(tk.Tk):
         self.allow_text.insert("1.0", "\n".join(self.config.allow_networks))
         self.deny_text.insert("1.0", "\n".join(self.config.deny_networks))
         self._action_bar()
+
+    def _build_transfers(self) -> None:
+        self._page_header("传输会话", "实时查看正在上传、等待续传和正在下载的文件")
+        toolbar = ttk.Frame(self.content)
+        toolbar.pack(fill="x", pady=(0, 12))
+        ttk.Button(toolbar, text="立即刷新", style="Secondary.TButton", command=self._refresh_transfers).pack(side="left")
+        ttk.Label(toolbar, text="每 0.5 秒自动刷新；完成的下载保留 10 秒", style="Muted.TLabel").pack(side="left", padx=12)
+        columns = ("direction", "path", "source", "progress", "speed", "status")
+        holder = ttk.Frame(self.content)
+        holder.pack(fill="both", expand=True)
+        self.transfer_tree = ttk.Treeview(holder, columns=columns, show="headings", selectmode="none")
+        headings = {
+            "direction": "方向",
+            "path": "文件",
+            "source": "来源设备",
+            "progress": "进度",
+            "speed": "平均速度",
+            "status": "状态",
+        }
+        widths = {"direction": 70, "path": 245, "source": 130, "progress": 170, "speed": 105, "status": 90}
+        for name in columns:
+            self.transfer_tree.heading(name, text=headings[name])
+            self.transfer_tree.column(name, width=widths[name], minwidth=60, stretch=name in {"path", "progress"})
+        scrollbar = ttk.Scrollbar(holder, orient="vertical", command=self.transfer_tree.yview)
+        self.transfer_tree.configure(yscrollcommand=scrollbar.set)
+        self.transfer_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self._refresh_transfers()
 
     def _build_accounts(self) -> None:
         self._page_header("账户管理", "用独立账户控制上传、删除和管理权限")
@@ -402,29 +482,92 @@ class CHFSApplication(tk.Tk):
         else:
             self.status_var.set("正在停止")
             self.status_detail_var.set("等待当前请求结束…")
-            self.after(10, self.controller.stop)
+            # 停止过程可能需要等待正在处理的请求，必须放到后台线程，避免 GUI
+            # 被 join 阻塞而出现文字与按钮状态交叉。
+            threading.Thread(target=self.controller.stop, name="chfs-stop-worker", daemon=True).start()
 
     def _poll_server_state(self) -> None:
         while not self._state_events.empty():
             self._state_events.get_nowait()
         state = self.controller.state
-        if hasattr(self, "toggle_button"):
+        if self.toggle_button is not None and self.toggle_button.winfo_exists():
             if state == "running":
-                self.status_var.set("服务运行中")
-                self.status_detail_var.set("可从局域网设备打开下方地址")
+                self.status_var.set("运行中")
+                if self.host_var.get().strip() in {"127.0.0.1", "::1", "localhost"}:
+                    self.status_detail_var.set("服务仅监听本机，请使用下方地址")
+                else:
+                    self.status_detail_var.set("可从局域网设备打开下方地址")
                 self.toggle_button.configure(text="停止服务", style="Danger.TButton")
             elif state == "stopped":
-                self.status_var.set("已停止")
+                self.status_var.set("已关闭")
                 self.status_detail_var.set("配置就绪，启动后即可在浏览器访问")
                 self.toggle_button.configure(text="启动服务", style="Primary.TButton")
             elif state == "starting":
                 self.status_var.set("正在启动")
-                self.toggle_button.configure(text="启动中…", state="disabled")
+                self.status_detail_var.set("正在绑定监听地址，请稍候…")
+                self.toggle_button.configure(text="正在启动…", style="Primary.TButton", state="disabled")
             else:
                 self.status_var.set("正在停止")
-        if hasattr(self, "toggle_button") and state not in {"starting"}:
+                self.status_detail_var.set("等待当前请求安全结束…")
+                self.toggle_button.configure(text="正在停止…", style="Danger.TButton", state="disabled")
+        if self.toggle_button is not None and self.toggle_button.winfo_exists() and state not in {"starting", "stopping"}:
             self.toggle_button.configure(state="normal")
+        if self._active_page == "transfers":
+            self._refresh_transfers()
         self.after(200, self._poll_server_state)
+
+    def _refresh_transfers(self) -> None:
+        tree = getattr(self, "transfer_tree", None)
+        if tree is None or not tree.winfo_exists():
+            return
+        for item in tree.get_children():
+            tree.delete(item)
+        status_names = {
+            "uploading": "上传中",
+            "waiting": "等待续传",
+            "downloading": "下载中",
+            "completed": "已完成",
+            "failed": "连接中断",
+        }
+        for item in self.controller.transfer_snapshots():
+            transferred = int(item["transferred_bytes"])
+            total = int(item["total_bytes"])
+            percentage = 100 if total == 0 else min(100, transferred * 100 // total)
+            progress = f"{self._format_bytes(transferred)} / {self._format_bytes(total)}  {percentage}%"
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    "上传" if item["direction"] == "upload" else "下载",
+                    item["path"],
+                    item["source"],
+                    progress,
+                    f"{self._format_bytes(float(item['bytes_per_second']))}/s",
+                    status_names.get(str(item["status"]), str(item["status"])),
+                ),
+            )
+
+    def _show_qr(self, url: str) -> None:
+        """把真实 URL 编码为二维码并显示在地址列表右侧。"""
+
+        if not hasattr(self, "qr_label") or not self.qr_label.winfo_exists():
+            return
+        code = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=1, border=2)
+        code.add_data(url)
+        code.make(fit=True)
+        matrix = code.get_matrix()
+        scale = max(3, 168 // len(matrix))
+        size = len(matrix) * scale
+        image = tk.PhotoImage(width=size, height=size)
+        image.put("#ffffff", to=(0, 0, size, size))
+        for row_index, row in enumerate(matrix):
+            for column_index, dark in enumerate(row):
+                if dark:
+                    x = column_index * scale
+                    y = row_index * scale
+                    image.put("#07131f", to=(x, y, x + scale, y + scale))
+        self._qr_photo = image
+        self.qr_label.configure(image=image, width=size, height=size)
 
     def _choose_root(self) -> None:
         selected = filedialog.askdirectory(initialdir=self.root_var.get(), title="选择共享目录")
@@ -501,6 +644,16 @@ class CHFSApplication(tk.Tk):
         return " / ".join(names) if names else "禁止访问"
 
     @staticmethod
+    def _format_bytes(value: float) -> str:
+        units = ("B", "KiB", "MiB", "GiB", "TiB")
+        amount = float(value)
+        for unit in units:
+            if abs(amount) < 1024 or unit == units[-1]:
+                return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+            amount /= 1024
+        return f"{amount:.1f} TiB"
+
+    @staticmethod
     def _safe_int(value: str, fallback: int) -> int:
         try:
             return int(value)
@@ -519,17 +672,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--print-window-handle", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--capture-page",
-        choices=("overview", "share", "network", "accounts", "security", "logs"),
+        choices=("overview", "share", "network", "transfers", "accounts", "security", "logs"),
         default="overview",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--capture-state",
+        choices=("stopped", "running"),
+        default="stopped",
         help=argparse.SUPPRESS,
     )
     args = parser.parse_args(argv)
     app = CHFSApplication(args.config)
     if args.capture_page != "overview":
         app.show_page(args.capture_page)
+    if args.capture_state == "running":
+        app.controller.start(app.config)
+        app.controller.wait_until_started()
+        app._poll_server_state()
     if args.print_window_handle:
         # 仅供自动化视觉验收使用。直接输出客户区的屏幕坐标与尺寸，避免控制台
         # 宿主让 Win32 MainWindowHandle/祖先窗口关系变得不可靠。
+        app.geometry("1120x720+260+80")
         app.update_idletasks()
         app.update()
         print(

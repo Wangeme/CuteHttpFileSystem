@@ -1,13 +1,18 @@
 param(
     [string]$OutputPath = "gui-overview.png",
-    [ValidateSet("overview", "share", "network", "accounts", "security", "logs")]
-    [string]$Page = "overview"
+    [ValidateSet("overview", "share", "network", "transfers", "accounts", "security", "logs")]
+    [string]$Page = "overview",
+    [ValidateSet("stopped", "running")]
+    [string]$State = "stopped",
+    [string]$ConfigPath = "",
+    [switch]$SeedTransfer
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $env:PYTHONPATH = Join-Path $projectRoot "src"
-$arguments = @("-m", "chfs.gui.app", "--config", (Join-Path $projectRoot "config.example.json"), "--capture-page", $Page, "--print-window-handle")
+$resolvedConfig = if ($ConfigPath) { Join-Path $projectRoot $ConfigPath } else { Join-Path $projectRoot "config.example.json" }
+$arguments = @("-m", "chfs.gui.app", "--config", $resolvedConfig, "--capture-page", $Page, "--capture-state", $State, "--print-window-handle")
 $pythonExecutable = (& python -c "import sys; print(sys.executable)").Trim()
 $stderrPath = Join-Path $projectRoot "artifacts\gui-capture-stderr.log"
 $stdoutPath = Join-Path $projectRoot "artifacts\gui-capture-stdout.log"
@@ -16,6 +21,8 @@ if (-not (Test-Path -LiteralPath $artifactDirectory)) {
     New-Item -ItemType Directory -Path $artifactDirectory | Out-Null
 }
 $process = Start-Process -FilePath $pythonExecutable -ArgumentList $arguments -WorkingDirectory $projectRoot -RedirectStandardError $stderrPath -RedirectStandardOutput $stdoutPath -PassThru
+$seedUploadId = $null
+$seedBaseUrl = $null
 
 try {
     $deadline = (Get-Date).AddSeconds(10)
@@ -29,6 +36,20 @@ try {
     if ($process.HasExited -or -not $geometryText) {
         $details = if (Test-Path -LiteralPath $stderrPath) { Get-Content -Raw -LiteralPath $stderrPath } else { "无错误输出" }
         throw "CHFS GUI 窗口未能启动：$details"
+    }
+
+    if ($SeedTransfer) {
+        $configDocument = Get-Content -Raw -LiteralPath $resolvedConfig | ConvertFrom-Json
+        $seedHost = if ($configDocument.host -in @('0.0.0.0', '::')) { '127.0.0.1' } else { [string]$configDocument.host }
+        $seedBaseUrl = "http://${seedHost}:$($configDocument.port)"
+        $seedBody = @{
+            path = 'capture-transfer-demo.bin'
+            size = 4294967296
+            resume_key = "capture-$([guid]::NewGuid().ToString('N'))"
+            overwrite = $false
+        } | ConvertTo-Json -Compress
+        $seedResponse = Invoke-RestMethod -Method Post -Uri "$seedBaseUrl/api/v1/uploads" -ContentType 'application/json' -Body $seedBody
+        $seedUploadId = $seedResponse.upload_id
     }
 
     # 等待桌面窗口管理器完成首次合成，避免复杂控件（如 Treeview）只截到半绘制状态。
@@ -57,6 +78,14 @@ try {
     }
 }
 finally {
+    if ($seedUploadId -and $seedBaseUrl -and -not $process.HasExited) {
+        try {
+            Invoke-RestMethod -Method Delete -Uri "$seedBaseUrl/api/v1/uploads/$seedUploadId" | Out-Null
+        }
+        catch {
+            # 截图已经完成时，清理失败不覆盖主要验收结果。
+        }
+    }
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force
     }

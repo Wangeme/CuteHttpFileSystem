@@ -74,8 +74,11 @@
   </dialog>
 
   <div id="uploadTray" class="upload-tray" hidden>
-    <div><strong id="uploadTitle">正在上传</strong><span id="uploadDetail"></span></div>
+    <div class="upload-heading"><strong id="uploadTitle">正在上传</strong><span id="uploadCounter">1 / 1</span></div>
+    <div class="upload-meta"><span id="uploadDetail"></span><span id="uploadSpeed">0 B/s</span></div>
     <progress id="uploadProgress" value="0" max="100"></progress>
+    <div class="upload-overall"><span>全部文件</span><span id="uploadOverallText">0%</span></div>
+    <progress id="uploadOverallProgress" value="0" max="100"></progress>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="/assets/app.js" type="module"></script>

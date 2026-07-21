@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import ipaddress
 from collections.abc import Callable
 
 import uvicorn
@@ -24,12 +25,16 @@ class ServerController:
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
         self._on_state_change = on_state_change or (lambda _state: None)
+        self._application = None
+        self._lifecycle_state = "stopped"
 
     @property
     def state(self) -> str:
         with self._lock:
             if self._thread is None:
                 return "stopped"
+            if self._lifecycle_state == "stopping" and self._thread.is_alive():
+                return "stopping"
             if self._server and self._server.started and self._thread.is_alive():
                 return "running"
             if self._thread.is_alive():
@@ -40,10 +45,12 @@ class ServerController:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return False
+            self._lifecycle_state = "starting"
             config.share_root.mkdir(parents=True, exist_ok=True)
+            self._application = create_app(config)
             self._server = uvicorn.Server(
                 uvicorn.Config(
-                    create_app(config),
+                    self._application,
                     host=config.host,
                     port=config.port,
                     log_level="info",
@@ -66,6 +73,8 @@ class ServerController:
         try:
             server.run()
         finally:
+            with self._lock:
+                self._lifecycle_state = "stopped"
             self._on_state_change("stopped")
 
     def stop(self, timeout: float = 5.0) -> bool:
@@ -74,10 +83,26 @@ class ServerController:
                 return False
             server = self._server
             thread = self._thread
+            self._lifecycle_state = "stopping"
             server.should_exit = True
         self._on_state_change("stopping")
         thread.join(timeout=timeout)
-        return not thread.is_alive()
+        stopped = not thread.is_alive()
+        if stopped:
+            with self._lock:
+                self._lifecycle_state = "stopped"
+        return stopped
+
+    def transfer_snapshots(self) -> list[dict[str, object]]:
+        """返回上传和下载会话快照；GUI 读取时不接触 Uvicorn 内部状态。"""
+
+        with self._lock:
+            application = self._application
+        if application is None:
+            return []
+        runtime = application.state.runtime
+        result = runtime.uploads.snapshots() + runtime.transfers.snapshots()
+        return sorted(result, key=lambda item: float(item["updated_at"]), reverse=True)
 
     def wait_until_started(self, timeout: float = 5.0) -> bool:
         """供测试和 GUI 状态轮询使用，不阻塞无限时间。"""
@@ -108,8 +133,20 @@ def discover_urls(host: str, port: int, *, https: bool = False) -> list[str]:
                 addresses.add(address)
     except OSError:
         pass
+    def address_priority(value: str) -> tuple[int, str]:
+        parsed = ipaddress.ip_address(value)
+        if parsed.is_link_local:
+            return (4, value)
+        if parsed.is_loopback:
+            return (3, value)
+        if parsed.version == 4 and parsed.is_private:
+            return (0, value)
+        if parsed.version == 6 and parsed.is_private:
+            return (1, value)
+        return (2, value)
+
     result = []
-    for address in sorted(addresses, key=lambda value: (value != "127.0.0.1", value)):
+    for address in sorted(addresses, key=address_priority):
         display = f"[{address}]" if ":" in address else address
         result.append(f"{'https' if https else 'http'}://{display}:{port}")
     return result

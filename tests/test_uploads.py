@@ -27,6 +27,10 @@ class ResumableUploadManagerTests(unittest.IsolatedAsyncioTestCase):
         second = b"b" * (1024 * 1024 + 17)
         expected = first + second
         session = self.manager.create(self.principal, "large.bin", len(expected), "resume-1")
+        snapshot = self.manager.snapshots()[0]
+        self.assertEqual(snapshot["direction"], "upload")
+        self.assertEqual(snapshot["status"], "waiting")
+        self.assertEqual(snapshot["total_bytes"], len(expected))
         self.assertFalse((self.root / "large.bin").exists(), "事务完成前不能暴露目标文件")
 
         first_digest = hashlib.sha256(first).digest()
@@ -66,6 +70,7 @@ class ResumableUploadManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manifest_hash, manifest)
         self.assertEqual((self.root / "large.bin").read_bytes(), expected)
         self.assertEqual(list(self.root.glob(".chfs-resume-*")), [])
+        self.assertEqual(self.manager.snapshots(), [])
 
     async def test_limit_and_cancel_cleanup(self) -> None:
         with self.assertRaises(UploadTooLargeError):

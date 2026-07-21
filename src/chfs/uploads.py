@@ -40,8 +40,11 @@ class UploadSession:
     temporary: Path
     expected_size: int
     overwrite: bool
+    source: str = "unknown"
     offset: int = 0
+    started_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    receiving: bool = False
     full_hasher: Any = field(default_factory=hashlib.sha256, repr=False)
     manifest_hasher: Any = field(default_factory=hashlib.sha256, repr=False)
 
@@ -69,6 +72,7 @@ class ResumableUploadManager:
         resume_key: str,
         *,
         overwrite: bool = False,
+        source: str = "unknown",
     ) -> UploadSession:
         require(principal, Permission.WRITE)
         if expected_size < 0:
@@ -106,6 +110,7 @@ class ResumableUploadManager:
                 temporary=Path(temporary_name),
                 expected_size=expected_size,
                 overwrite=overwrite,
+                source=source,
             )
             self._sessions[session.upload_id] = session
             self._resume_index[index_key] = session.upload_id
@@ -126,32 +131,39 @@ class ResumableUploadManager:
         if len(declared_sha256) != 64:
             raise IntegrityMismatchError("分块 SHA-256 格式无效")
 
-        # 单次请求最多只保留 MAX_CHUNK_SIZE，文件总大小不影响进程内存占用。
-        buffer = bytearray()
-        async for chunk in chunks:
-            buffer.extend(chunk)
-            if len(buffer) > MAX_CHUNK_SIZE:
-                raise UploadTooLargeError("单个上传分块超过 32 MiB")
-        if not buffer and session.expected_size != 0:
-            raise ResourceConflictError("上传分块不能为空")
-        if session.offset + len(buffer) > session.expected_size:
-            raise UploadTooLargeError("收到的数据超过声明的文件大小")
-
-        actual_digest = hashlib.sha256(buffer).digest()
-        if not secrets.compare_digest(actual_digest.hex(), declared_sha256.casefold()):
-            raise IntegrityMismatchError("分块完整性校验失败，请重传该分块")
-
-        # append 由偏移检查保证顺序；写入成功后才推进会话状态。
         with self._lock:
-            if offset != session.offset:
-                raise ResourceConflictError(f"上传偏移不匹配，当前偏移为 {session.offset}")
-            with session.temporary.open("ab", buffering=0) as stream:
-                stream.write(buffer)
-            session.full_hasher.update(buffer)
-            session.manifest_hasher.update(actual_digest)
-            session.offset += len(buffer)
+            session.receiving = True
             session.updated_at = time.time()
-        return session
+        try:
+            # 单次请求最多只保留 MAX_CHUNK_SIZE，文件总大小不影响进程内存占用。
+            buffer = bytearray()
+            async for chunk in chunks:
+                buffer.extend(chunk)
+                if len(buffer) > MAX_CHUNK_SIZE:
+                    raise UploadTooLargeError("单个上传分块超过 32 MiB")
+            if not buffer and session.expected_size != 0:
+                raise ResourceConflictError("上传分块不能为空")
+            if session.offset + len(buffer) > session.expected_size:
+                raise UploadTooLargeError("收到的数据超过声明的文件大小")
+
+            actual_digest = hashlib.sha256(buffer).digest()
+            if not secrets.compare_digest(actual_digest.hex(), declared_sha256.casefold()):
+                raise IntegrityMismatchError("分块完整性校验失败，请重传该分块")
+
+            # append 由偏移检查保证顺序；写入成功后才推进会话状态。
+            with self._lock:
+                if offset != session.offset:
+                    raise ResourceConflictError(f"上传偏移不匹配，当前偏移为 {session.offset}")
+                with session.temporary.open("ab", buffering=0) as stream:
+                    stream.write(buffer)
+                session.full_hasher.update(buffer)
+                session.manifest_hasher.update(actual_digest)
+                session.offset += len(buffer)
+                session.updated_at = time.time()
+            return session
+        finally:
+            with self._lock:
+                session.receiving = False
 
     def complete(
         self,
@@ -206,6 +218,31 @@ class ResumableUploadManager:
             "chunk_size": DEFAULT_CHUNK_SIZE,
             "prefix_manifest_sha256": session.manifest_hasher.copy().hexdigest(),
         }
+
+    def snapshots(self) -> list[dict[str, object]]:
+        """返回所有尚未提交的上传会话，供服务端控制台展示。"""
+
+        with self._lock:
+            self._purge_expired()
+            sessions = list(self._sessions.values())
+        result: list[dict[str, object]] = []
+        for session in sessions:
+            elapsed = max(session.updated_at - session.started_at, 0.001)
+            result.append(
+                {
+                    "id": session.upload_id,
+                    "direction": "upload",
+                    "path": session.public_path,
+                    "owner": session.owner,
+                    "source": session.source,
+                    "transferred_bytes": session.offset,
+                    "total_bytes": session.expected_size,
+                    "bytes_per_second": session.offset / elapsed,
+                    "status": "uploading" if session.receiving else "waiting",
+                    "updated_at": session.updated_at,
+                }
+            )
+        return sorted(result, key=lambda item: float(item["updated_at"]), reverse=True)
 
     def _get(self, principal: Principal, upload_id: str) -> UploadSession:
         with self._lock:
