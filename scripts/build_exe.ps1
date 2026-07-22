@@ -104,9 +104,29 @@ if ($LASTEXITCODE -ne 0) {
 $exePath = Join-Path $OutputDirectory "CHFS.exe"
 
 # Explorer 会按完整路径缓存 EXE 图标。重复覆盖桌面的 CHFS.exe 时，即使新图标
-# 已正确写入 PE 资源，也可能继续显示旧的 Python 图标；通知 Shell 立即重载。
+# 已正确写入 PE 资源，也可能继续显示旧的 Python 图标；先清理图标缓存，再通过
+# Shell 变更通知要求桌面重新提取 EXE 内的图标。此操作不会删除用户文件。
 $iconRefresh = Join-Path $env:SystemRoot "System32\ie4uinit.exe"
 if (Test-Path -LiteralPath $iconRefresh) {
+    & $iconRefresh -ClearIconCache
     & $iconRefresh -show
+}
+
+try {
+    if (-not ("ChfsShellRefresh" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class ChfsShellRefresh {
+    [DllImport("shell32.dll")]
+    public static extern void SHChangeNotify(uint eventId, uint flags, IntPtr item1, IntPtr item2);
+}
+"@
+    }
+    # SHCNE_ASSOCCHANGED 会让 Explorer 重新读取图标及文件关联缓存。
+    [ChfsShellRefresh]::SHChangeNotify(0x08000000, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero)
+}
+catch {
+    Write-Warning "The executable was built, but Explorer icon refresh failed: $($_.Exception.Message)"
 }
 Write-Host "Build completed: $exePath" -ForegroundColor Green
