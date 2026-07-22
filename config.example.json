@@ -1,5 +1,6 @@
 {
   "share_root": "shared",
+  "full_disk_access": false,
   "host": "0.0.0.0",
   "port": 8080,
   "max_upload_bytes": 1099511627776,

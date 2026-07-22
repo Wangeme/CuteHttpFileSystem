@@ -17,3 +17,4 @@ dist/
 # 自动化截图和基准产物保留在本地，不进入发行包
 artifacts/*.log
 artifacts/*.pid
+artifacts/release/

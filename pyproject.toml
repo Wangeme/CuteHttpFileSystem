@@ -22,4 +22,4 @@ chfs-gui = "chfs.gui.app:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-chfs = ["web/*.html", "web/*.css", "web/*.js"]
+chfs = ["web/*.html", "web/*.css", "web/*.js", "gui/*.png", "gui/*.ico"]

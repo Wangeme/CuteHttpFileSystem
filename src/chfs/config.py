@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,12 +14,48 @@ from .models import Permission
 from .security import Account, verify_password
 
 
+WINDOWS_DOWNLOADS_FOLDER_ID = "{374DE290-123F-4565-9164-39C4925E467B}"
+
+
+def default_config_path() -> Path:
+    """返回当前用户的默认配置文件位置。"""
+
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        return Path(os.environ["LOCALAPPDATA"]) / "CHFS" / "config.json"
+    if os.environ.get("XDG_CONFIG_HOME"):
+        return Path(os.environ["XDG_CONFIG_HOME"]) / "chfs" / "config.json"
+    return Path.home() / ".config" / "chfs" / "config.json"
+
+
+def default_downloads_directory() -> Path:
+    """读取当前用户的下载目录，兼容 Windows 目录重定向。"""
+
+    if os.name == "nt":
+        try:
+            import winreg
+
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                value, _kind = winreg.QueryValueEx(key, WINDOWS_DOWNLOADS_FOLDER_ID)
+            if isinstance(value, str) and value.strip():
+                return Path(os.path.expandvars(value)).expanduser()
+        except (ImportError, OSError):
+            pass
+    return Path.home() / "Downloads"
+
+
+def default_share_root() -> Path:
+    """返回无需配置即可使用的默认共享目录。"""
+
+    return default_downloads_directory() / "CHFShare"
+
+
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     """校验后的不可变运行配置。"""
 
     share_root: Path
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = 8080
     max_upload_bytes: int = 1024**4
     session_ttl_seconds: int = 8 * 60 * 60
@@ -31,6 +68,7 @@ class AppConfig:
     allow_networks: tuple[str, ...] = ()
     deny_networks: tuple[str, ...] = ()
     accounts: tuple[Account, ...] = ()
+    full_disk_access: bool = False
 
     @classmethod
     def load(cls, config_path: Path) -> "AppConfig":
@@ -79,6 +117,7 @@ class AppConfig:
                 }
                 for item in self.accounts
             ],
+            "full_disk_access": self.full_disk_access,
         }
 
     def save(self, config_path: Path) -> None:
@@ -104,6 +143,7 @@ class AppConfig:
             "allow_networks",
             "deny_networks",
             "accounts",
+            "full_disk_access",
         }
         unknown = sorted(set(data) - allowed_keys)
         if unknown:
@@ -125,7 +165,7 @@ class AppConfig:
                 raise InvalidConfigurationError(f"TLS 证书文件不存在：{certificate}")
             if private_key is None or not private_key.is_file():
                 raise InvalidConfigurationError(f"TLS 私钥文件不存在：{private_key}")
-        host = _string(data.get("host", "127.0.0.1"), "host")
+        host = _string(data.get("host", "0.0.0.0"), "host")
         port = _integer(data.get("port", 8080), "port", minimum=1, maximum=65535)
         maximum = _integer(data.get("max_upload_bytes", 1024**4), "max_upload_bytes", minimum=1)
         ttl = _integer(data.get("session_ttl_seconds", 28800), "session_ttl_seconds", minimum=60)
@@ -136,6 +176,9 @@ class AppConfig:
         allow = _networks(data.get("allow_networks", []), "allow_networks")
         deny = _networks(data.get("deny_networks", []), "deny_networks")
         accounts = _accounts(data.get("accounts", []))
+        full_disk_access = data.get("full_disk_access", False)
+        if not isinstance(full_disk_access, bool):
+            raise InvalidConfigurationError("full_disk_access 必须是布尔值")
         usernames = [item.username for item in accounts]
         if len(usernames) != len(set(usernames)):
             raise InvalidConfigurationError("账户用户名不能重复")
@@ -152,6 +195,7 @@ class AppConfig:
             allow_networks=allow,
             deny_networks=deny,
             accounts=accounts,
+            full_disk_access=full_disk_access,
         )
 
 

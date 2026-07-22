@@ -19,7 +19,7 @@ from .audit import AuditLogger
 from .config import AppConfig
 from .errors import AuthenticationError, CHFSError, InvalidPathError
 from .models import Principal
-from .paths import SafePathResolver
+from .paths import FullDiskPathResolver, SafePathResolver
 from .security import NetworkPolicy, SessionManager
 from .services import FileService
 from .transfers import TransferRegistry
@@ -124,7 +124,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 def create_app(config: AppConfig) -> Starlette:
     """装配应用依赖；测试和 GUI 都可据此创建独立服务实例。"""
 
-    resolver = SafePathResolver(config.share_root)
+    resolver = FullDiskPathResolver() if config.full_disk_access else SafePathResolver(config.share_root)
     runtime = Runtime(
         config=config,
         files=FileService(resolver, config.max_upload_bytes),
@@ -344,7 +344,7 @@ async def upload_chunk(request: Request) -> Response:
         raise InvalidPathError("offset 必须是非负整数") from exc
     if offset < 0:
         raise InvalidPathError("offset 必须是非负整数")
-    declared_sha256 = request.headers.get("x-chfs-chunk-sha256", "")
+    declared_sha256 = request.headers.get("x-chfs-chunk-sha256") or None
     session = await runtime.uploads.append(
         principal,
         upload_id,
@@ -361,7 +361,7 @@ async def complete_resumable_upload(request: Request) -> JSONResponse:
     upload_id = request.path_params["upload_id"]
     payload = await _json_object(request)
     manifest = payload.get("manifest_sha256")
-    if not isinstance(manifest, str) or len(manifest) != 64:
+    if manifest is not None and (not isinstance(manifest, str) or len(manifest) != 64):
         raise InvalidPathError("manifest_sha256 格式无效")
     entry, file_sha256, manifest_sha256 = runtime.uploads.complete(principal, upload_id, manifest)
     runtime.audit.record(

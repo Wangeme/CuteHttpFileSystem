@@ -5,12 +5,16 @@ from __future__ import annotations
 import socket
 import threading
 import ipaddress
+import logging
 from collections.abc import Callable
 
 import uvicorn
 
 from ..config import AppConfig
 from ..http import create_app
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ServerController:
@@ -27,6 +31,7 @@ class ServerController:
         self._on_state_change = on_state_change or (lambda _state: None)
         self._application = None
         self._lifecycle_state = "stopped"
+        self._last_error: str | None = None
 
     @property
     def state(self) -> str:
@@ -46,7 +51,9 @@ class ServerController:
             if self._thread and self._thread.is_alive():
                 return False
             self._lifecycle_state = "starting"
-            config.share_root.mkdir(parents=True, exist_ok=True)
+            self._last_error = None
+            if not config.full_disk_access:
+                config.share_root.mkdir(parents=True, exist_ok=True)
             self._application = create_app(config)
             self._server = uvicorn.Server(
                 uvicorn.Config(
@@ -55,6 +62,10 @@ class ServerController:
                     port=config.port,
                     log_level="info",
                     access_log=True,
+                    # PyInstaller 的 --windowed 模式会把 sys.stdout/sys.stderr
+                    # 设为 None。Uvicorn 的默认日志配置依赖这些流，会导致服务
+                    # 在线程启动前直接退出，因此由桌面程序自行管理日志。
+                    log_config=None,
                     ssl_certfile=str(config.tls_certificate) if config.tls_certificate else None,
                     ssl_keyfile=str(config.tls_private_key) if config.tls_private_key else None,
                 )
@@ -72,10 +83,22 @@ class ServerController:
     def _run(self, server: uvicorn.Server) -> None:
         try:
             server.run()
+        except BaseException as exc:
+            # 后台线程的异常必须保存给 GUI；窗口版 EXE 没有控制台可显示回溯。
+            LOGGER.exception("HTTP 服务线程异常退出")
+            with self._lock:
+                self._last_error = f"{type(exc).__name__}: {exc}"
         finally:
             with self._lock:
                 self._lifecycle_state = "stopped"
             self._on_state_change("stopped")
+
+    @property
+    def last_error(self) -> str | None:
+        """返回最近一次启动/运行错误，供无控制台的 GUI 显示。"""
+
+        with self._lock:
+            return self._last_error
 
     def stop(self, timeout: float = 5.0) -> bool:
         with self._lock:

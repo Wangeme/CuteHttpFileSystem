@@ -14,19 +14,22 @@ from .errors import (
     UploadTooLargeError,
 )
 from .models import FileEntry, Permission, Principal
-from .paths import SafePathResolver
+from .paths import FullDiskPathResolver, SafePathResolver
 from .security import require
 
 
 class FileService:
     """封装所有文件用例和授权规则，不依赖 HTTP。"""
 
-    def __init__(self, resolver: SafePathResolver, max_upload_bytes: int) -> None:
+    def __init__(self, resolver: SafePathResolver | FullDiskPathResolver, max_upload_bytes: int) -> None:
         self.resolver = resolver
         self.max_upload_bytes = max_upload_bytes
 
     def list_directory(self, principal: Principal, user_path: str = "") -> list[FileEntry]:
         require(principal, Permission.READ)
+        root_entries = self.resolver.root_entries()
+        if not user_path and root_entries is not None:
+            return root_entries
         target = self.resolver.resolve(user_path)
         if not target.exists():
             raise ResourceNotFoundError("目录不存在")
@@ -113,7 +116,7 @@ class FileService:
     def delete(self, principal: Principal, user_path: str, *, recursive: bool = False) -> None:
         require(principal, Permission.DELETE)
         target = self.resolver.resolve(user_path)
-        if target == self.resolver.root:
+        if self.resolver.is_root(target):
             raise ResourceConflictError("不能删除共享根目录")
         if not target.exists():
             raise ResourceNotFoundError("目标不存在")
@@ -134,4 +137,3 @@ async def bytes_chunks(parts: Iterable[bytes]) -> AsyncIterable[bytes]:
 
     for part in parts:
         yield part
-

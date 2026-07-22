@@ -85,23 +85,19 @@ def main() -> int:
             )
             upload_id = str(created["upload_id"])
             file_hasher = hashlib.sha256()
-            manifest_hasher = hashlib.sha256()
             offset = 0
             upload_started = time.perf_counter()
             while offset < total_size:
                 chunk = pattern[: min(DEFAULT_CHUNK_SIZE, total_size - offset)]
-                digest = hashlib.sha256(chunk).digest()
                 file_hasher.update(chunk)
-                manifest_hasher.update(digest)
                 _, state = request_json(
                     connection,
                     "PATCH",
                     f"/api/v1/uploads/{urllib.parse.quote(upload_id)}?offset={offset}",
                     chunk,
-                    {"X-CHFS-Chunk-SHA256": digest.hex()},
                 )
                 offset = int(state["offset"])
-            complete_body = json.dumps({"manifest_sha256": manifest_hasher.hexdigest()}).encode()
+            complete_body = b"{}"
             _, completed = request_json(
                 connection,
                 "POST",
@@ -142,6 +138,7 @@ def main() -> int:
                 "size_bytes": total_size,
                 "size_mib": args.size_mib,
                 "chunk_bytes": DEFAULT_CHUNK_SIZE,
+                "integrity_mode": "fast",
                 "upload_seconds": round(upload_seconds, 4),
                 "upload_mib_per_second": round(args.size_mib / upload_seconds, 2),
                 "download_seconds": round(download_seconds, 4),
@@ -165,4 +162,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

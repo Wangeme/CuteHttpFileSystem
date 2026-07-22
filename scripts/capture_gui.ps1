@@ -13,7 +13,13 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $env:PYTHONPATH = Join-Path $projectRoot "src"
 $resolvedConfig = if ($ConfigPath) { Join-Path $projectRoot $ConfigPath } else { Join-Path $projectRoot "config.example.json" }
 $arguments = @("-m", "chfs.gui.app", "--config", $resolvedConfig, "--capture-page", $Page, "--capture-state", $State, "--print-window-handle")
-$pythonExecutable = (& python -c "import sys; print(sys.executable)").Trim()
+$venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
+$pythonExecutable = if (Test-Path -LiteralPath $venvPython) {
+    $venvPython
+}
+else {
+    (& python -c "import sys; print(sys.executable)").Trim()
+}
 $stderrPath = Join-Path $projectRoot "artifacts\gui-capture-stderr.log"
 $stdoutPath = Join-Path $projectRoot "artifacts\gui-capture-stdout.log"
 $artifactDirectory = Split-Path -Parent $stderrPath

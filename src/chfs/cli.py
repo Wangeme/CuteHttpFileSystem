@@ -10,7 +10,7 @@ from pathlib import Path
 
 import uvicorn
 
-from .config import AppConfig
+from .config import AppConfig, default_config_path
 from .errors import CHFSError
 from .http import create_app
 from .security import hash_password
@@ -20,13 +20,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chfs", description="CHFS HTTP 文件传输服务器")
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve", help="启动 HTTP 服务")
-    serve.add_argument("--config", type=Path, default=Path("config.json"), help="JSON 配置文件")
+    serve.add_argument("--config", type=Path, default=default_config_path(), help="JSON 配置文件")
     check = commands.add_parser("check-config", help="检查配置但不启动服务")
-    check.add_argument("--config", type=Path, default=Path("config.json"), help="JSON 配置文件")
+    check.add_argument("--config", type=Path, default=default_config_path(), help="JSON 配置文件")
     password = commands.add_parser("hash-password", help="交互生成密码散列")
     password.add_argument("--password", help="不推荐：直接从命令行传入密码")
     gui = commands.add_parser("gui", help="启动桌面管理器")
-    gui.add_argument("--config", type=Path, default=Path("config.json"), help="JSON 配置文件")
+    gui.add_argument("--config", type=Path, default=default_config_path(), help="JSON 配置文件")
     return parser
 
 
@@ -45,9 +45,11 @@ def main(argv: list[str] | None = None) -> int:
             print(hash_password(password))
             return 0
         config = AppConfig.load(args.config)
-        config.share_root.mkdir(parents=True, exist_ok=True)
+        if not config.full_disk_access:
+            config.share_root.mkdir(parents=True, exist_ok=True)
         if args.command == "check-config":
-            print(f"配置有效，共享目录：{config.share_root}")
+            target = "本机所有可访问磁盘" if config.full_disk_access else str(config.share_root)
+            print(f"配置有效，共享范围：{target}")
             return 0
         uvicorn.run(
             create_app(config),

@@ -1,7 +1,5 @@
 "use strict";
 
-import { concatenateBytes, hashBytes, toHex } from "./sha256.js";
-
 // 浏览器端只负责交互和协议适配；路径验证、权限和磁盘操作始终由服务端内核执行。
 const state = {
   path: "",
@@ -117,9 +115,7 @@ function createRow(entry) {
   const nameCell = document.createElement("td");
   const nameWrap = document.createElement("div");
   nameWrap.className = "file-name";
-  const type = document.createElement("span");
-  type.className = "file-type";
-  type.textContent = entry.type === "directory" ? "DIR" : "FILE";
+  const type = createPixelIcon(entry.type);
   const name = document.createElement("button");
   name.className = "name-button";
   name.type = "button";
@@ -141,6 +137,39 @@ function createRow(entry) {
   actionsCell.append(actions);
   row.append(nameCell, size, modified, actionsCell);
   return row;
+}
+
+function createPixelIcon(type) {
+  const canvas = document.createElement("canvas");
+  canvas.className = "file-type";
+  canvas.width = 16;
+  canvas.height = 16;
+  canvas.setAttribute("role", "img");
+  canvas.setAttribute("aria-label", type === "directory" ? "文件夹" : "文件");
+  const context = canvas.getContext("2d");
+  context.imageSmoothingEnabled = false;
+  context.clearRect(0, 0, 16, 16);
+  if (type === "directory") {
+    context.fillStyle = "#5eead4";
+    context.fillRect(1, 4, 14, 10);
+    context.fillRect(2, 2, 6, 3);
+    context.fillStyle = "#0f766e";
+    context.fillRect(2, 7, 12, 6);
+    context.fillStyle = "#99f6e4";
+    context.fillRect(3, 5, 10, 2);
+  } else {
+    context.fillStyle = "#cbd5e1";
+    context.fillRect(3, 1, 9, 14);
+    context.fillRect(12, 4, 2, 11);
+    context.fillStyle = "#64748b";
+    context.fillRect(12, 3, 1, 1);
+    context.fillRect(11, 2, 1, 2);
+    context.fillStyle = "#2dd4bf";
+    context.fillRect(5, 7, 6, 1);
+    context.fillRect(5, 10, 7, 1);
+    context.fillRect(5, 13, 5, 1);
+  }
+  return canvas;
 }
 
 function actionButton(label, handler, danger = false) {
@@ -231,59 +260,52 @@ async function uploadOne(file, path, batch, index) {
     body: JSON.stringify({ path, size: file.size, resume_key: resumeKey, overwrite: false }),
   });
   const chunkSize = session.chunk_size;
-  const chunkDigests = [];
-
-  // 续传时重新读取本地前缀并核对分块清单，防止同名同大小但内容不同的文件混接。
+  // 默认快速模式不重复读取并哈希已经上传的前缀。
   if (session.offset > 0) {
-    updateUploadDisplay(batch, file, index, 0, "验证续传点");
-    for (let position = 0; position < session.offset; position += chunkSize) {
-      const digest = await hashBytes(await file.slice(position, Math.min(position + chunkSize, session.offset)).arrayBuffer());
-      chunkDigests.push(digest);
-      updateUploadDisplay(batch, file, index, Math.min(position + chunkSize, session.offset), "验证续传点");
-    }
-    const prefixManifest = toHex(await hashBytes(concatenateBytes(chunkDigests)));
-    if (prefixManifest !== session.prefix_manifest_sha256) {
-      await api(`/api/v1/uploads/${encode(session.upload_id)}`, { method: "DELETE" });
-      localStorage.removeItem(storageKey);
-      throw new Error("本地文件与服务器续传数据不一致，旧临时数据已清理，请重新选择文件");
-    }
+    updateUploadDisplay(batch, file, index, session.offset, "从断点继续");
   }
 
-  for (let position = session.offset; position < file.size; position += chunkSize) {
-    const end = Math.min(position + chunkSize, file.size);
-    const bytes = await file.slice(position, end).arrayBuffer();
-    const digest = await hashBytes(bytes);
-    chunkDigests.push(digest);
-    updateUploadDisplay(batch, file, index, position, "校验并上传");
+  let prepared = session.offset < file.size ? await prepareUploadChunk(file, session.offset, chunkSize) : null;
+  while (prepared) {
+    // 在当前分块传输期间并行预读下一分块，减少磁盘等待。
+    const nextPromise = prepared.end < file.size
+      ? prepareUploadChunk(file, prepared.end, chunkSize)
+      : Promise.resolve(null);
+    updateUploadDisplay(batch, file, index, prepared.position, "准备上传");
     session = await sendChunkWithRetry(
       session.upload_id,
-      position,
-      bytes,
-      toHex(digest),
+      prepared.position,
+      prepared.bytes,
       file.size,
       (loaded, networkDelta) => {
         batch.networkBytes += networkDelta;
-        updateUploadDisplay(batch, file, index, position + loaded, "正在上传");
+        updateUploadDisplay(batch, file, index, prepared.position + loaded, "正在上传");
       },
     );
-    updateUploadDisplay(batch, file, index, session.offset, "分块已校验");
+    updateUploadDisplay(batch, file, index, session.offset, "分块已写入");
+    prepared = await nextPromise;
   }
-  const manifest = toHex(await hashBytes(concatenateBytes(chunkDigests)));
   updateUploadDisplay(batch, file, index, file.size, "正在原子提交");
   const completed = await api(`/api/v1/uploads/${encode(session.upload_id)}/complete`, {
     method: "POST",
     json: true,
-    body: JSON.stringify({ manifest_sha256: manifest }),
+    body: JSON.stringify({}),
   });
   localStorage.removeItem(storageKey);
   elements.uploadDetail.textContent = `SHA-256 ${completed.sha256.slice(0, 12)}…`;
   elements.progress.value = 100;
 }
 
-async function sendChunkWithRetry(uploadId, offset, bytes, digest, totalSize, onProgress) {
+async function prepareUploadChunk(file, position, chunkSize) {
+  const end = Math.min(position + chunkSize, file.size);
+  const bytes = await file.slice(position, end).arrayBuffer();
+  return { position, end, bytes };
+}
+
+async function sendChunkWithRetry(uploadId, offset, bytes, totalSize, onProgress) {
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try { return await sendChunk(uploadId, offset, bytes, digest, totalSize, onProgress); }
+    try { return await sendChunk(uploadId, offset, bytes, totalSize, onProgress); }
     catch (error) {
       lastError = error;
       if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 350 * attempt));
@@ -292,12 +314,11 @@ async function sendChunkWithRetry(uploadId, offset, bytes, digest, totalSize, on
   throw lastError;
 }
 
-function sendChunk(uploadId, offset, bytes, digest, totalSize, onProgress) {
+function sendChunk(uploadId, offset, bytes, totalSize, onProgress) {
   return new Promise((resolve, reject) => {
     let lastLoaded = 0;
     const xhr = new XMLHttpRequest();
     xhr.open("PATCH", `/api/v1/uploads/${encode(uploadId)}?offset=${offset}`);
-    xhr.setRequestHeader("X-CHFS-Chunk-SHA256", digest);
     if (state.token) xhr.setRequestHeader("Authorization", `Bearer ${state.token}`);
     xhr.upload.addEventListener("progress", event => {
       if (event.lengthComputable) {

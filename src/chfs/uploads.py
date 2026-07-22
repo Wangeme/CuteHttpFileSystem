@@ -20,10 +20,10 @@ from .errors import (
     UploadTooLargeError,
 )
 from .models import FileEntry, Permission, Principal
-from .paths import SafePathResolver
+from .paths import FullDiskPathResolver, SafePathResolver
 from .security import require
 
-DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
+DEFAULT_CHUNK_SIZE = 16 * 1024 * 1024
 MAX_CHUNK_SIZE = 32 * 1024 * 1024
 SESSION_TTL_SECONDS = 24 * 60 * 60
 
@@ -52,12 +52,12 @@ class UploadSession:
 class ResumableUploadManager:
     """以固定内存占用接收、校验并原子提交大文件。
 
-    每个 HTTP 分块先在内存中完成 SHA-256 校验，验证通过后才顺序写入临时文件；
-    全部字节到齐并刷新磁盘后使用 ``os.replace`` 原子发布，因此共享目录中不会
-    出现可见的半文件。
+    默认快速模式按精确偏移顺序写入并流式计算整文件 SHA-256；严格 API 客户端
+    仍可为分块提供 SHA-256。全部字节到齐并刷新磁盘后使用 ``os.replace`` 原子
+    发布，因此共享目录中不会出现可见的半文件。
     """
 
-    def __init__(self, resolver: SafePathResolver, max_upload_bytes: int) -> None:
+    def __init__(self, resolver: SafePathResolver | FullDiskPathResolver, max_upload_bytes: int) -> None:
         self.resolver = resolver
         self.max_upload_bytes = max_upload_bytes
         self._sessions: dict[str, UploadSession] = {}
@@ -121,14 +121,14 @@ class ResumableUploadManager:
         principal: Principal,
         upload_id: str,
         offset: int,
-        declared_sha256: str,
+        declared_sha256: str | None,
         chunks: AsyncIterable[bytes],
     ) -> UploadSession:
         require(principal, Permission.WRITE)
         session = self._get(principal, upload_id)
         if offset != session.offset:
             raise ResourceConflictError(f"上传偏移不匹配，当前偏移为 {session.offset}")
-        if len(declared_sha256) != 64:
+        if declared_sha256 is not None and len(declared_sha256) != 64:
             raise IntegrityMismatchError("分块 SHA-256 格式无效")
 
         with self._lock:
@@ -146,9 +146,11 @@ class ResumableUploadManager:
             if session.offset + len(buffer) > session.expected_size:
                 raise UploadTooLargeError("收到的数据超过声明的文件大小")
 
-            actual_digest = hashlib.sha256(buffer).digest()
-            if not secrets.compare_digest(actual_digest.hex(), declared_sha256.casefold()):
-                raise IntegrityMismatchError("分块完整性校验失败，请重传该分块")
+            actual_digest = None
+            if declared_sha256 is not None:
+                actual_digest = hashlib.sha256(buffer).digest()
+                if not secrets.compare_digest(actual_digest.hex(), declared_sha256.casefold()):
+                    raise IntegrityMismatchError("分块完整性校验失败，请重传该分块")
 
             # append 由偏移检查保证顺序；写入成功后才推进会话状态。
             with self._lock:
@@ -157,7 +159,8 @@ class ResumableUploadManager:
                 with session.temporary.open("ab", buffering=0) as stream:
                     stream.write(buffer)
                 session.full_hasher.update(buffer)
-                session.manifest_hasher.update(actual_digest)
+                if actual_digest is not None:
+                    session.manifest_hasher.update(actual_digest)
                 session.offset += len(buffer)
                 session.updated_at = time.time()
             return session
@@ -169,7 +172,7 @@ class ResumableUploadManager:
         self,
         principal: Principal,
         upload_id: str,
-        declared_manifest_sha256: str,
+        declared_manifest_sha256: str | None,
     ) -> tuple[FileEntry, str, str]:
         require(principal, Permission.WRITE)
         session = self._get(principal, upload_id)
@@ -178,7 +181,9 @@ class ResumableUploadManager:
                 f"文件尚未上传完成：{session.offset}/{session.expected_size} 字节"
             )
         manifest = session.manifest_hasher.hexdigest()
-        if not secrets.compare_digest(manifest, declared_manifest_sha256.casefold()):
+        if declared_manifest_sha256 is not None and not secrets.compare_digest(
+            manifest, declared_manifest_sha256.casefold()
+        ):
             self.cancel(principal, upload_id)
             raise IntegrityMismatchError("文件分块清单校验失败，临时数据已清理")
 

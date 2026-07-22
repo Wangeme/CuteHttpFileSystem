@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from chfs.errors import InvalidPathError
-from chfs.paths import SafePathResolver
+from chfs.paths import FullDiskPathResolver, SafePathResolver
 
 
 class SafePathResolverTests(unittest.TestCase):
@@ -28,7 +28,20 @@ class SafePathResolverTests(unittest.TestCase):
     def test_root_empty_path_is_accepted(self) -> None:
         self.assertEqual(self.resolver.resolve(""), self.root)
 
+    def test_full_disk_resolver_exposes_virtual_drive_roots(self) -> None:
+        drive_c = self.root / "drive-c"
+        drive_d = self.root / "drive-d"
+        drive_c.mkdir()
+        drive_d.mkdir()
+        (drive_d / "demo.txt").write_text("demo", encoding="utf-8")
+        resolver = FullDiskPathResolver({"C": drive_c, "D": drive_d})
+        self.assertEqual([entry.path for entry in resolver.root_entries()], ["C", "D"])
+        self.assertEqual(resolver.resolve("D/demo.txt"), drive_d / "demo.txt")
+        self.assertEqual(resolver.relative(drive_d / "demo.txt"), "D/demo.txt")
+        self.assertTrue(resolver.is_root(drive_c))
+        with self.assertRaises(InvalidPathError):
+            resolver.resolve("")
+
 
 if __name__ == "__main__":
     unittest.main()
-

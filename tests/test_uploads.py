@@ -87,6 +87,21 @@ class ResumableUploadManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(session.temporary.exists())
         self.assertFalse((self.root / "cancel.bin").exists())
 
+    async def test_fast_mode_uses_size_offset_and_server_file_hash(self) -> None:
+        content = b"fast-mode" * 10000
+        session = self.manager.create(self.principal, "fast.bin", len(content), "resume-fast")
+        await self.manager.append(
+            self.principal,
+            session.upload_id,
+            0,
+            None,
+            bytes_chunks([content]),
+        )
+        entry, file_hash, _manifest = self.manager.complete(self.principal, session.upload_id, None)
+        self.assertEqual(entry.size, len(content))
+        self.assertEqual(file_hash, hashlib.sha256(content).hexdigest())
+        self.assertEqual((self.root / "fast.bin").read_bytes(), content)
+
 
 if __name__ == "__main__":
     unittest.main()

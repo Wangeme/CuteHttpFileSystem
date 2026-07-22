@@ -113,6 +113,8 @@ class HttpIntegrationTests(unittest.TestCase):
         status, body, _ = self.request("GET", "/assets/app.js")
         self.assertEqual(status, 200)
         self.assertIn(b"loadFiles", body)
+        self.assertIn(b"createPixelIcon", body)
+        self.assertNotIn(b'type.textContent = entry.type === "directory" ? "DIR" : "FILE"', body)
         status, body, _ = self.request("GET", "/assets/sha256.js")
         self.assertEqual(status, 200)
         self.assertIn(b"sha256Fallback", body)

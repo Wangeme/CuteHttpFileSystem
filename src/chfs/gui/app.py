@@ -11,8 +11,10 @@ import ctypes
 import json
 import os
 import queue
+import subprocess
 import threading
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 
 import qrcode
@@ -21,6 +23,7 @@ import qrcode
 # 与屏幕物理像素不一致。必须在导入并初始化 tkinter 之前声明系统 DPI 感知。
 if os.name == "nt":
     try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("CHFS.FileTransfer.Server")
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except (AttributeError, OSError):
         try:
@@ -30,9 +33,8 @@ if os.name == "nt":
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from tkinter.scrolledtext import ScrolledText
 
-from ..config import AppConfig
+from ..config import AppConfig, default_config_path, default_share_root
 from ..errors import CHFSError
 from ..models import Permission
 from ..security import Account, hash_password
@@ -54,7 +56,7 @@ WARNING = "#fbbf24"
 class CHFSApplication(tk.Tk):
     """桌面应用主窗口。"""
 
-    def __init__(self, config_path: Path) -> None:
+    def __init__(self, config_path: Path, *, auto_start: bool = True) -> None:
         super().__init__()
         self.config_path = config_path.resolve()
         self.config = self._load_or_default()
@@ -64,6 +66,13 @@ class CHFSApplication(tk.Tk):
         self._active_page = "overview"
 
         self.title("CHFS · HTTP 文件传输服务器")
+        self._window_icon = tk.PhotoImage(file=Path(__file__).with_name("chfs-icon.png"))
+        self.iconphoto(True, self._window_icon)
+        if os.name == "nt":
+            try:
+                self.iconbitmap(default=str(Path(__file__).with_name("chfs.ico")))
+            except tk.TclError:
+                pass
         self.geometry("1120x720")
         self.minsize(960, 640)
         self.configure(background=BG)
@@ -73,6 +82,9 @@ class CHFSApplication(tk.Tk):
         self._build_shell()
         self.show_page("overview")
         self.after(150, self._poll_server_state)
+        if auto_start:
+            # 等主窗口完成绘制后再启动，确保失败信息能够正常显示。
+            self.after(250, self._start_server)
 
     def _load_or_default(self) -> AppConfig:
         if self.config_path.exists():
@@ -80,7 +92,11 @@ class CHFSApplication(tk.Tk):
                 return AppConfig.load(self.config_path)
             except CHFSError as exc:
                 messagebox.showwarning("配置未加载", f"{exc}\n将使用安全默认配置。")
-        return AppConfig(share_root=(self.config_path.parent / "shared").resolve(), audit_log=(self.config_path.parent / "logs" / "audit.jsonl").resolve())
+        return AppConfig(
+            share_root=default_share_root().resolve(),
+            host="0.0.0.0",
+            audit_log=(self.config_path.parent / "logs" / "audit.jsonl").resolve(),
+        )
 
     def _create_variables(self) -> None:
         self.root_var = tk.StringVar(value=str(self.config.share_root))
@@ -93,6 +109,7 @@ class CHFSApplication(tk.Tk):
         self.read_var = tk.BooleanVar(value=Permission.READ in self.config.guest_permissions)
         self.write_var = tk.BooleanVar(value=Permission.WRITE in self.config.guest_permissions)
         self.delete_var = tk.BooleanVar(value=Permission.DELETE in self.config.guest_permissions)
+        self.full_disk_var = tk.BooleanVar(value=self.config.full_disk_access)
         self.status_var = tk.StringVar(value="已关闭")
         self.status_detail_var = tk.StringVar(value="配置就绪，启动后即可在浏览器访问")
 
@@ -121,6 +138,8 @@ class CHFSApplication(tk.Tk):
         style.map("Primary.TButton", background=[("active", "#5eead4"), ("disabled", BORDER)])
         style.configure("Secondary.TButton", background=SURFACE_ALT, foreground=TEXT, padding=(14, 9), borderwidth=1)
         style.map("Secondary.TButton", background=[("active", BORDER)])
+        style.configure("Compact.TButton", background=SURFACE_ALT, foreground=TEXT, padding=(7, 6), borderwidth=1)
+        style.map("Compact.TButton", background=[("active", BORDER)])
         style.configure("Danger.TButton", background="#4a2230", foreground="#fecdd3", padding=(14, 9), borderwidth=0)
         style.map("Danger.TButton", background=[("active", "#6b293b")])
         style.configure("TEntry", padding=9, insertcolor=TEXT)
@@ -146,7 +165,7 @@ class CHFSApplication(tk.Tk):
             ("transfers", "传输会话"),
             ("accounts", "账户管理"),
             ("security", "安全状态"),
-            ("logs", "操作日志"),
+            ("logs", "审计日志"),
         ]
         self.nav_buttons: dict[str, ttk.Button] = {}
         for key, label in pages:
@@ -199,24 +218,41 @@ class CHFSApplication(tk.Tk):
         self.toggle_button = ttk.Button(hero, text="启动服务", style="Primary.TButton", command=self._toggle_server)
         self.toggle_button.grid(row=0, column=1, padx=(20, 0))
 
-        metrics = ttk.Frame(self.content)
-        metrics.pack(fill="x", pady=18)
-        for column in range(3):
-            metrics.columnconfigure(column, weight=1)
-        values = [
-            ("共享目录", Path(self.root_var.get()).name or self.root_var.get()),
-            ("访客权限", self._guest_summary()),
-            ("账户数量", str(len(self.accounts))),
-        ]
-        for index, (label, value) in enumerate(values):
-            card = ttk.Frame(metrics, style="Surface.TFrame", padding=18)
-            card.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 6, 0 if index == 2 else 6))
-            ttk.Label(card, text=label, style="CardTitle.TLabel").pack(anchor="w")
-            ttk.Label(card, text=value, style="Surface.TLabel", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w", pady=(8, 0))
+        # 高频配置收拢到一条状态栏中：用户无需跳页即可确认共享范围，并能快速
+        # 开关高风险的全盘访问。红色只用于危险操作，避免界面产生过多视觉噪声。
+        scope = ttk.Frame(self.content, style="Surface.TFrame", padding=(18, 14))
+        scope.pack(fill="x", pady=(14, 0))
+        scope.columnconfigure(0, weight=2)
+        scope.columnconfigure(1, weight=2)
+        scope.columnconfigure(2, weight=1)
+        scope.columnconfigure(3, weight=0)
+        scope_name = "本机所有可用磁盘" if self.full_disk_var.get() else (Path(self.root_var.get()).name or self.root_var.get())
+        for column, (label, value) in enumerate(
+            (("共享范围", scope_name), ("访客权限", self._guest_summary()), ("账户", f"{len(self.accounts)} 个"))
+        ):
+            cell = ttk.Frame(scope, style="Surface.TFrame")
+            cell.grid(row=0, column=column, sticky="w", padx=(0, 28))
+            ttk.Label(cell, text=label, style="CardTitle.TLabel").pack(anchor="w")
+            ttk.Label(cell, text=value, style="Surface.TLabel", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", pady=(4, 0))
+        if self.full_disk_var.get():
+            ttk.Button(scope, text="关闭全盘访问", style="Secondary.TButton", command=self._toggle_full_disk_access).grid(
+                row=0, column=3, sticky="e"
+            )
+        else:
+            ttk.Button(scope, text="开放全盘访问", style="Danger.TButton", command=self._toggle_full_disk_access).grid(
+                row=0, column=3, sticky="e"
+            )
 
-        addresses = self._surface(self.content, fill="both", expand=True)
+        workspace = ttk.Frame(self.content)
+        workspace.pack(fill="both", expand=True, pady=(14, 0))
+        workspace.columnconfigure(0, weight=2)
+        workspace.columnconfigure(1, weight=1)
+        workspace.rowconfigure(0, weight=1)
+
+        addresses = ttk.Frame(workspace, style="Surface.TFrame", padding=18)
+        addresses.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
         ttk.Label(addresses, text="访问地址", style="Surface.TLabel", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
-        ttk.Label(addresses, text="悬停地址可显示二维码；手机扫码即可打开。", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 12))
+        ttk.Label(addresses, text="悬停地址可切换二维码，手机扫码即可打开", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 12))
         urls = discover_urls(
             self.host_var.get(),
             self._safe_int(self.port_var.get(), 8080),
@@ -242,8 +278,8 @@ class CHFSApplication(tk.Tk):
         canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
         canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"))
 
-        body.columnconfigure(1, minsize=190)
-        qr_panel = ttk.Frame(body, style="Surface.TFrame", width=190)
+        body.columnconfigure(1, minsize=145)
+        qr_panel = ttk.Frame(body, style="Surface.TFrame", width=145)
         qr_panel.grid(row=0, column=1, sticky="ne")
         ttk.Label(qr_panel, text="扫码访问", style="CardTitle.TLabel").pack(anchor="center", pady=(0, 7))
         self.qr_label = tk.Label(qr_panel, bg="#ffffff", bd=0)
@@ -260,16 +296,34 @@ class CHFSApplication(tk.Tk):
                 font=("Cascadia Mono", 9),
                 anchor="w",
                 justify="left",
-                wraplength=360,
+                wraplength=210,
             )
             url_label.pack(side="left", fill="x", expand=True)
-            ttk.Button(row, text="复制", style="Secondary.TButton", command=lambda value=url: self._copy(value)).pack(side="right")
-            ttk.Button(row, text="打开", style="Secondary.TButton", command=lambda value=url: webbrowser.open(value)).pack(side="right", padx=6)
+            ttk.Button(row, text="复制", width=4, style="Compact.TButton", command=lambda value=url: self._copy(value)).pack(side="right")
+            ttk.Button(row, text="打开", width=4, style="Compact.TButton", command=lambda value=url: webbrowser.open(value)).pack(side="right", padx=5)
             row.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
             url_label.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
         if urls:
             preferred = next((item for item in urls if "192.168." in item or "10." in item or "172." in item), urls[0])
             self._show_qr(preferred)
+
+        logs = ttk.Frame(workspace, style="Surface.TFrame", padding=18)
+        logs.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+        logs.columnconfigure(0, weight=1)
+        logs.rowconfigure(2, weight=1)
+        log_header = ttk.Frame(logs, style="Surface.TFrame")
+        log_header.grid(row=0, column=0, sticky="ew")
+        ttk.Label(log_header, text="最近操作", style="Surface.TLabel", font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
+        ttk.Button(log_header, text="查看全部", width=7, style="Compact.TButton", command=lambda: self.show_page("logs")).pack(side="right")
+        ttk.Label(
+            logs,
+            text="操作日志与审计日志使用同一份记录",
+            style="CardTitle.TLabel",
+            wraplength=225,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 12))
+        self.overview_log_host = ttk.Frame(logs, style="Surface.TFrame")
+        self.overview_log_host.grid(row=2, column=0, sticky="nsew")
+        self._load_overview_logs()
 
     def _build_share(self) -> None:
         self._page_header("共享与权限", "设置可访问目录、上传限制和访客默认能力")
@@ -287,6 +341,34 @@ class CHFSApplication(tk.Tk):
         ttk.Checkbutton(checks, text="浏览与下载", variable=self.read_var).pack(side="left", padx=(0, 18))
         ttk.Checkbutton(checks, text="上传与新建目录", variable=self.write_var).pack(side="left", padx=(0, 18))
         ttk.Checkbutton(checks, text="删除", variable=self.delete_var).pack(side="left")
+        disk_access = ttk.Frame(card, style="Surface.TFrame")
+        disk_access.pack(fill="x", pady=(18, 4))
+        if self.full_disk_var.get():
+            tk.Label(
+                disk_access,
+                text="高风险模式已开启：所有访客可访问本机全部可用磁盘",
+                bg=SURFACE,
+                fg=DANGER,
+                font=("Microsoft YaHei UI", 10, "bold"),
+            ).pack(side="left")
+            ttk.Button(
+                disk_access,
+                text="关闭全盘访问",
+                style="Secondary.TButton",
+                command=self._toggle_full_disk_access,
+            ).pack(side="right")
+        else:
+            ttk.Label(
+                disk_access,
+                text="仅在完全可信的局域网中使用全盘访客访问",
+                style="CardTitle.TLabel",
+            ).pack(side="left")
+            ttk.Button(
+                disk_access,
+                text="开放全盘访客访问",
+                style="Danger.TButton",
+                command=self._toggle_full_disk_access,
+            ).pack(side="right")
         self._action_bar()
 
     def _build_network(self) -> None:
@@ -402,12 +484,31 @@ class CHFSApplication(tk.Tk):
         self._action_bar()
 
     def _build_logs(self) -> None:
-        self._page_header("操作日志", "查看最近的登录、上传、下载和删除审计事件")
+        self._page_header("审计日志", "操作日志与审计日志是同一份记录，包含来源设备和操作结果")
         toolbar = ttk.Frame(self.content)
         toolbar.pack(fill="x", pady=(0, 12))
         ttk.Button(toolbar, text="刷新", style="Secondary.TButton", command=self._load_logs).pack(side="left")
-        self.log_text = ScrolledText(self.content, bg=SURFACE, fg="#cbd5e1", insertbackground=TEXT, relief="flat", font=("Cascadia Mono", 9), padx=12, pady=12)
-        self.log_text.pack(fill="both", expand=True)
+        ttk.Button(toolbar, text="用记事本打开", style="Secondary.TButton", command=self._open_audit_log).pack(side="right")
+        columns = ("time", "actor", "action", "ip", "mac", "result")
+        holder = ttk.Frame(self.content)
+        holder.pack(fill="both", expand=True)
+        self.log_tree = ttk.Treeview(holder, columns=columns, show="headings", selectmode="browse")
+        headings = {
+            "time": "时间",
+            "actor": "用户",
+            "action": "操作",
+            "ip": "IP 地址",
+            "mac": "MAC 地址",
+            "result": "结果",
+        }
+        widths = {"time": 146, "actor": 62, "action": 238, "ip": 116, "mac": 138, "result": 58}
+        for name in columns:
+            self.log_tree.heading(name, text=headings[name])
+            self.log_tree.column(name, width=widths[name], minwidth=60, stretch=name == "action")
+        scrollbar = ttk.Scrollbar(holder, orient="vertical", command=self.log_tree.yview)
+        self.log_tree.configure(yscrollcommand=scrollbar.set)
+        self.log_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
         self._load_logs()
 
     def _field_label(self, parent: tk.Misc, title: str, help_text: str, *, row: int | None = None, column: int = 0) -> None:
@@ -455,8 +556,36 @@ class CHFSApplication(tk.Tk):
                 {"username": item.username, "password_hash": item.password_hash, "permissions": sorted(permission.value for permission in item.permissions)}
                 for item in self.accounts
             ],
+            "full_disk_access": self.full_disk_var.get(),
         }
         return AppConfig.from_dict(document, base_dir=self.config_path.parent)
+
+    def _toggle_full_disk_access(self) -> None:
+        if self.controller.state != "stopped":
+            messagebox.showwarning("请先停止服务", "改变全盘访问范围前必须先停止服务。")
+            return
+        if self.full_disk_var.get():
+            if not messagebox.askyesno("关闭全盘访问", "恢复为默认 CHFShare 共享目录？"):
+                return
+            self.full_disk_var.set(False)
+            self.root_var.set(str(default_share_root().resolve()))
+        else:
+            confirmed = messagebox.askyesno(
+                "高风险：开放本机全部磁盘",
+                "开启后，任何能连接到 CHFS 的访客无需登录即可浏览、上传和删除本机所有可访问磁盘中的文件。\n\n"
+                "删除操作不可恢复，系统目录也可能被修改。仅应在完全可信的隔离局域网中开启。\n\n"
+                "确定继续吗？",
+                icon="warning",
+            )
+            if not confirmed:
+                return
+            self.full_disk_var.set(True)
+            self.read_var.set(True)
+            self.write_var.set(True)
+            self.delete_var.set(True)
+        current_page = self._active_page
+        if self._save_config(quiet=True):
+            self.show_page(current_page)
 
     def _save_config(self, *, quiet: bool = False) -> bool:
         if self.controller.state != "stopped":
@@ -474,17 +603,24 @@ class CHFSApplication(tk.Tk):
 
     def _toggle_server(self) -> None:
         if self.controller.state == "stopped":
-            if not self._save_config(quiet=True):
-                return
-            if self.controller.start(self.config):
-                self.status_var.set("正在启动")
-                self.status_detail_var.set("正在绑定监听地址，请稍候…")
+            self._start_server()
         else:
             self.status_var.set("正在停止")
             self.status_detail_var.set("等待当前请求结束…")
             # 停止过程可能需要等待正在处理的请求，必须放到后台线程，避免 GUI
             # 被 join 阻塞而出现文字与按钮状态交叉。
             threading.Thread(target=self.controller.stop, name="chfs-stop-worker", daemon=True).start()
+
+    def _start_server(self) -> None:
+        """保存当前配置并启动服务，可供按钮和默认自动启动共同调用。"""
+
+        if self.controller.state != "stopped":
+            return
+        if not self._save_config(quiet=True):
+            return
+        if self.controller.start(self.config):
+            self.status_var.set("正在启动")
+            self.status_detail_var.set("正在绑定监听地址，请稍候…")
 
     def _poll_server_state(self) -> None:
         while not self._state_events.empty():
@@ -493,14 +629,20 @@ class CHFSApplication(tk.Tk):
         if self.toggle_button is not None and self.toggle_button.winfo_exists():
             if state == "running":
                 self.status_var.set("运行中")
-                if self.host_var.get().strip() in {"127.0.0.1", "::1", "localhost"}:
+                if self.full_disk_var.get():
+                    self.status_detail_var.set("高风险：访客可访问本机所有可用磁盘")
+                elif self.host_var.get().strip() in {"127.0.0.1", "::1", "localhost"}:
                     self.status_detail_var.set("服务仅监听本机，请使用下方地址")
                 else:
                     self.status_detail_var.set("可从局域网设备打开下方地址")
                 self.toggle_button.configure(text="停止服务", style="Danger.TButton")
             elif state == "stopped":
-                self.status_var.set("已关闭")
-                self.status_detail_var.set("配置就绪，启动后即可在浏览器访问")
+                if self.controller.last_error:
+                    self.status_var.set("启动失败")
+                    self.status_detail_var.set(self.controller.last_error)
+                else:
+                    self.status_var.set("已关闭")
+                    self.status_detail_var.set("配置就绪，启动后即可在浏览器访问")
                 self.toggle_button.configure(text="启动服务", style="Primary.TButton")
             elif state == "starting":
                 self.status_var.set("正在启动")
@@ -611,22 +753,129 @@ class CHFSApplication(tk.Tk):
             self.show_page("accounts")
 
     def _load_logs(self) -> None:
-        if not hasattr(self, "log_text"):
+        tree = getattr(self, "log_tree", None)
+        if tree is None or not tree.winfo_exists():
             return
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
+        for item in tree.get_children():
+            tree.delete(item)
+        events = self._read_audit_events(limit=300)
+        if not events:
+            tree.insert("", "end", values=("暂无记录", "-", "启动服务并执行文件操作后会显示在这里", "-", "-", "-"))
+            return
+        for event in events:
+            tree.insert("", "end", values=self._audit_row_values(event))
+
+    def _load_overview_logs(self) -> None:
+        """在概览页显示少量人类可读的操作记录，完整字段仍留在审计页。"""
+
+        host = getattr(self, "overview_log_host", None)
+        if host is None or not host.winfo_exists():
+            return
+        for child in host.winfo_children():
+            child.destroy()
+        events = self._read_audit_events(limit=3)
+        if not events:
+            ttk.Label(host, text="暂无操作记录", style="Surface.TLabel", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", pady=(12, 4))
+            ttk.Label(host, text="上传、下载或删除文件后会显示在这里", style="CardTitle.TLabel", wraplength=260).pack(anchor="w")
+            return
+        for index, event in enumerate(events):
+            row = ttk.Frame(host, style="Surface.TFrame", padding=(0, 8))
+            row.pack(fill="x")
+            title = ttk.Frame(row, style="Surface.TFrame")
+            title.pack(fill="x")
+            action = self._audit_action_text(event)
+            if len(action) > 28:
+                action = f"{action[:25]}…"
+            ttk.Label(
+                title,
+                text=action,
+                style="Surface.TLabel",
+                font=("Microsoft YaHei UI", 9, "bold"),
+                wraplength=175,
+            ).pack(
+                side="left", fill="x", expand=True
+            )
+            result_color = ACCENT if event.get("success") else DANGER
+            tk.Label(title, text="成功" if event.get("success") else "失败", bg=SURFACE, fg=result_color, font=("Microsoft YaHei UI", 8, "bold")).pack(side="right")
+            source = event.get("source_ip", event.get("source", "-"))
+            summary = f"{self._format_audit_time(str(event.get('timestamp', '')))}  ·  {source}"
+            ttk.Label(row, text=summary, style="CardTitle.TLabel").pack(anchor="w", pady=(3, 0))
+            if index < len(events) - 1:
+                ttk.Separator(host, orient="horizontal").pack(fill="x")
+
+    def _read_audit_events(self, *, limit: int) -> list[dict[str, object]]:
+        """读取最近的结构化审计事件；损坏行不会影响其余日志展示。"""
+
         path = self.config.audit_log
         if not path or not path.exists():
-            self.log_text.insert("end", "暂无审计记录。启动服务并执行文件操作后会显示在这里。")
-        else:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-300:]
-            for line in lines:
-                try:
-                    event = json.loads(line)
-                    self.log_text.insert("end", f"{event.get('timestamp', '')}  {event.get('actor', '-'):12}  {event.get('action', '-'):<20}  {'成功' if event.get('success') else '失败'}\n")
-                except json.JSONDecodeError:
-                    self.log_text.insert("end", line + "\n")
-        self.log_text.configure(state="disabled")
+            return []
+        events: list[dict[str, object]] = []
+        for line in reversed(path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                event = {"timestamp": "格式错误", "action": line[:80], "success": False}
+            if isinstance(event, dict):
+                events.append(event)
+        return events
+
+    @staticmethod
+    def _audit_action_text(event: dict[str, object]) -> str:
+        action_names = {
+            "session.login": "账户登录",
+            "session.logout": "退出登录",
+            "upload.create": "创建上传会话",
+            "upload.cancel": "取消上传",
+            "file.upload": "上传文件",
+            "file.download": "下载文件",
+            "file.delete": "删除文件",
+            "directory.create": "新建文件夹",
+            "network.reject": "拒绝网络访问",
+        }
+        raw_action = str(event.get("action", "-") or "-")
+        action = action_names.get(raw_action, raw_action)
+        details = event.get("details")
+        detail_path = details.get("path") if isinstance(details, dict) else None
+        return f"{action} · {detail_path}" if detail_path else action
+
+    def _audit_row_values(self, event: dict[str, object]) -> tuple[object, ...]:
+        return (
+            self._format_audit_time(str(event.get("timestamp", ""))),
+            event.get("actor", "-"),
+            self._audit_action_text(event),
+            event.get("source_ip", event.get("source", "-")),
+            event.get("source_mac", "-"),
+            "成功" if event.get("success") else "失败",
+        )
+
+    @staticmethod
+    def _format_audit_time(value: str) -> str:
+        try:
+            instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if instant.tzinfo is not None:
+                instant = instant.astimezone()
+            # 概览和表格空间有限；省略通常重复的年份，保留秒级精度。
+            return instant.strftime("%m-%d %H:%M:%S")
+        except (AttributeError, ValueError):
+            return value or "-"
+
+    def _open_audit_log(self) -> None:
+        path = self.config.audit_log
+        if path is None:
+            messagebox.showinfo("未配置日志", "当前没有配置审计日志文件。")
+            return
+        if not path.exists():
+            messagebox.showinfo("暂无日志", "日志文件会在第一次文件操作后自动创建。")
+            return
+        try:
+            if os.name == "nt":
+                # JSONL 适合作为追加式审计存储，但 Windows 默认没有文件关联。
+                # 明确使用系统记事本，让普通用户无需选择应用即可直接查看。
+                subprocess.Popen(["notepad.exe", str(path)])
+            else:
+                webbrowser.open(path.as_uri())
+        except OSError as exc:
+            messagebox.showerror("无法打开日志", str(exc))
 
     def _copy(self, value: str) -> None:
         self.clipboard_clear()
@@ -668,7 +917,7 @@ class CHFSApplication(tk.Tk):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="CHFS 桌面管理器")
-    parser.add_argument("--config", type=Path, default=Path("config.json"))
+    parser.add_argument("--config", type=Path, default=default_config_path())
     parser.add_argument("--print-window-handle", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--capture-page",
@@ -683,7 +932,8 @@ def main(argv: list[str] | None = None) -> int:
         help=argparse.SUPPRESS,
     )
     args = parser.parse_args(argv)
-    app = CHFSApplication(args.config)
+    # 自动化截图需要显式控制停止/运行状态；普通启动默认立即开启服务。
+    app = CHFSApplication(args.config, auto_start=not args.print_window_handle)
     if args.capture_page != "overview":
         app.show_page(args.capture_page)
     if args.capture_state == "running":

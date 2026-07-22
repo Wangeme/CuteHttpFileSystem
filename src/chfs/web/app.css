@@ -59,7 +59,7 @@ th:nth-child(2) { width: 130px; } th:nth-child(3) { width: 190px; } th:last-chil
 td { height: 65px; padding: 0 20px; border-top: 1px solid rgba(44, 59, 79, .72); color: #cfd9e3; font-size: 14px; }
 tr:hover td { background: rgba(34, 49, 69, .55); }
 .file-name { display: flex; align-items: center; gap: 12px; min-width: 220px; }
-.file-type { flex: 0 0 auto; width: 33px; height: 33px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 8px; color: var(--accent); font-size: 10px; font-weight: 800; letter-spacing: .04em; }
+.file-type { flex: 0 0 auto; width: 32px; height: 32px; padding: 5px; border: 1px solid var(--border); border-radius: 8px; background: #111a26; image-rendering: pixelated; image-rendering: crisp-edges; }
 .name-button { overflow: hidden; appearance: none; max-width: 520px; padding: 8px 0; border: 0; background: transparent; color: var(--text); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .name-button:hover { color: var(--accent); }
 .row-actions { display: flex; justify-content: flex-end; gap: 5px; }
