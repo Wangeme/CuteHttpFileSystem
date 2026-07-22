@@ -57,12 +57,21 @@ class ServerControllerTests(unittest.TestCase):
         addresses = [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.1.2", 0)),
             (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fd00::2", 0, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.1", 0)),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.8", 0)),
         ]
         with patch("chfs.gui.controller.socket.getaddrinfo", return_value=addresses):
             urls = discover_urls("0.0.0.0", 8080)
-        self.assertEqual(urls[0], "http://192.168.1.8:8080")
-        self.assertEqual(urls[-1], "http://169.254.1.2:8080")
+        self.assertEqual(urls, ["http://192.168.1.8:8080", "http://127.0.0.1:8080"])
+
+    def test_ipv6_addresses_are_only_shown_for_ipv6_wildcard(self) -> None:
+        addresses = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.8", 0)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fd00::2", 0, 0, 0)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fe80::2", 0, 0, 3)),
+        ]
+        with patch("chfs.gui.controller.socket.getaddrinfo", return_value=addresses):
+            self.assertEqual(discover_urls("::", 8080), ["http://[fd00::2]:8080", "http://[::1]:8080"])
 
 
 if __name__ == "__main__":

@@ -276,7 +276,31 @@ class CHFSApplication(tk.Tk):
         window_id = canvas.create_window((0, 0), window=address_list, anchor="nw")
         address_list.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
-        canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"))
+
+        def scroll_addresses(event: tk.Event[tk.Misc]) -> str:
+            """让滚轮在地址文字、行和按钮上都能控制外层画布。"""
+
+            steps = -1 if event.delta > 0 else 1
+            canvas.yview_scroll(steps, "units")
+            return "break"
+
+        def start_middle_drag(_event: tk.Event[tk.Misc]) -> str:
+            y = self.winfo_pointery() - canvas.winfo_rooty()
+            canvas.scan_mark(0, y)
+            return "break"
+
+        def move_middle_drag(_event: tk.Event[tk.Misc]) -> str:
+            y = self.winfo_pointery() - canvas.winfo_rooty()
+            canvas.scan_dragto(0, y, gain=1)
+            return "break"
+
+        def bind_address_scrolling(widget: tk.Misc) -> None:
+            widget.bind("<MouseWheel>", scroll_addresses)
+            widget.bind("<ButtonPress-2>", start_middle_drag)
+            widget.bind("<B2-Motion>", move_middle_drag)
+
+        bind_address_scrolling(canvas)
+        bind_address_scrolling(address_list)
 
         body.columnconfigure(1, minsize=145)
         qr_panel = ttk.Frame(body, style="Surface.TFrame", width=145)
@@ -299,8 +323,12 @@ class CHFSApplication(tk.Tk):
                 wraplength=210,
             )
             url_label.pack(side="left", fill="x", expand=True)
-            ttk.Button(row, text="复制", width=4, style="Compact.TButton", command=lambda value=url: self._copy(value)).pack(side="right")
-            ttk.Button(row, text="打开", width=4, style="Compact.TButton", command=lambda value=url: webbrowser.open(value)).pack(side="right", padx=5)
+            copy_button = ttk.Button(row, text="复制", width=4, style="Compact.TButton", command=lambda value=url: self._copy(value))
+            copy_button.pack(side="right")
+            open_button = ttk.Button(row, text="打开", width=4, style="Compact.TButton", command=lambda value=url: webbrowser.open(value))
+            open_button.pack(side="right", padx=5)
+            for widget in (row, url_label, copy_button, open_button):
+                bind_address_scrolling(widget)
             row.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
             url_label.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
         if urls:

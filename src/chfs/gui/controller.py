@@ -143,30 +143,58 @@ class ServerController:
 
 
 def discover_urls(host: str, port: int, *, https: bool = False) -> list[str]:
-    """根据监听地址生成可复制的访问地址，过滤无用和重复结果。"""
+    """根据监听协议族生成可复制的访问地址，过滤虚拟/保留地址。"""
 
     if host not in {"0.0.0.0", "::"}:
         display_host = f"[{host}]" if ":" in host else host
         return [f"{'https' if https else 'http'}://{display_host}:{port}"]
-    addresses = {"127.0.0.1"}
+    ipv4_wildcard = host == "0.0.0.0"
+    addresses = {"127.0.0.1" if ipv4_wildcard else "::1"}
+    link_local_fallbacks: set[str] = set()
+    rfc1918_networks = (
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("192.168.0.0/16"),
+    )
+    ula_network = ipaddress.ip_network("fc00::/7")
     try:
         for item in socket.getaddrinfo(socket.gethostname(), None):
             address = item[4][0]
-            if not address.startswith("127.") and address != "::1" and "%" not in address:
-                addresses.add(address)
-    except OSError:
+            try:
+                parsed = ipaddress.ip_address(address.split("%", 1)[0])
+            except ValueError:
+                continue
+            # 0.0.0.0 只监听 IPv4；过去把 IPv6 地址也列出来会造成“看起来可用，
+            # 实际无法连接”的误导。监听 :: 时同理只展示 IPv6。
+            if parsed.version != (4 if ipv4_wildcard else 6) or parsed.is_loopback:
+                continue
+            if parsed.is_link_local:
+                if parsed.version == 4:
+                    link_local_fallbacks.add(str(parsed))
+                continue
+            if parsed.version == 4:
+                if any(parsed in network for network in rfc1918_networks) or parsed.is_global:
+                    addresses.add(str(parsed))
+            elif parsed in ula_network or parsed.is_global:
+                addresses.add(str(parsed))
+    except (OSError, UnicodeError):
         pass
+
+    # 没有正常局域网地址时，169.254/16 仍可用于同一物理链路上的应急访问。
+    if ipv4_wildcard and addresses == {"127.0.0.1"}:
+        addresses.update(link_local_fallbacks)
+
     def address_priority(value: str) -> tuple[int, str]:
         parsed = ipaddress.ip_address(value)
-        if parsed.is_link_local:
-            return (4, value)
         if parsed.is_loopback:
             return (3, value)
-        if parsed.version == 4 and parsed.is_private:
+        if parsed.is_link_local:
+            return (2, value)
+        if parsed.version == 4 and any(parsed in network for network in rfc1918_networks):
             return (0, value)
-        if parsed.version == 6 and parsed.is_private:
-            return (1, value)
-        return (2, value)
+        if parsed.version == 6 and parsed in ula_network:
+            return (0, value)
+        return (1, value)
 
     result = []
     for address in sorted(addresses, key=address_priority):
