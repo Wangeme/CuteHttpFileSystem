@@ -292,90 +292,155 @@ async def create_directory(request: Request) -> JSONResponse:
 async def create_resumable_upload(request: Request) -> JSONResponse:
     """创建新上传事务，或按续传标识返回现有偏移。"""
 
+    # 从当前 Web 应用中取出共享的运行时对象，其中包含上传管理器。
     runtime = _runtime(request)
+    # 根据请求中的认证信息解析当前用户；后续管理器还会检查写权限。
     principal = _principal(request)
+    # 异步读取并验证请求体是一个 JSON 对象。
     payload = await _json_object(request)
+    # 读取浏览器声明的目标路径。
     user_path = payload.get("path")
+    # 读取浏览器声明的完整文件字节数。
     expected_size = payload.get("size")
+    # 读取浏览器保存在 localStorage 中的续传标识。
     resume_key = payload.get("resume_key")
+    # 未明确提供 overwrite 时默认禁止覆盖同名文件。
     overwrite = payload.get("overwrite", False)
+    # 路径必须是非空字符串。
     if not isinstance(user_path, str) or not user_path:
         raise InvalidPathError("必须提供文件路径")
+    # Python 的 bool 是 int 的子类，所以必须先单独排除布尔值。
     if isinstance(expected_size, bool) or not isinstance(expected_size, int):
         raise InvalidPathError("size 必须是非负整数")
+    # 续传键必须是字符串；更细的长度检查由上传管理器完成。
     if not isinstance(resume_key, str):
         raise InvalidPathError("resume_key 必须是字符串")
+    # 覆盖开关只接受真正的 JSON 布尔值。
     if not isinstance(overwrite, bool):
         raise InvalidPathError("overwrite 必须是布尔值")
+    # 创建新会话或按 resume_key 恢复已有会话。
     session = runtime.uploads.create(
+        # 当前认证用户。
         principal,
+        # 最终目标路径。
         user_path,
+        # 完整文件的预期长度。
         expected_size,
+        # 客户端续传标识。
         resume_key,
+        # 是否允许覆盖已有目标。
         overwrite=overwrite,
+        # 记录请求来源 IP，供状态和审计使用。
         source=_source(request),
     )
+    # 记录创建或恢复上传事务的审计事件。
     runtime.audit.record(
+        # 审计事件类型。
         "upload.create",
+        # 操作者名称。
         actor=principal.name,
+        # 请求来源地址。
         source=_source(request),
+        # 执行到这里说明创建成功。
         success=True,
+        # 用户请求的目标路径。
         path=user_path,
+        # 声明的文件总大小。
         size=expected_size,
+        # 服务端当前已保存偏移；恢复上传时可能大于零。
         offset=session.offset,
     )
+    # 返回上传 ID、offset 和 chunk_size；201 表示资源已创建。
     return JSONResponse(runtime.uploads.status_dict(session), status_code=201)
 
 
 async def upload_chunk(request: Request) -> Response:
+    # 获取共享运行时对象。
     runtime = _runtime(request)
+    # 解析当前用户身份。
     principal = _principal(request)
+    # 从路由路径 /uploads/{upload_id} 中取得上传会话 ID。
     upload_id = request.path_params["upload_id"]
+    # 同一路由也承担取消上传功能，DELETE 不会继续进入分块接收逻辑。
     if request.method == "DELETE":
+        # 删除临时文件及其内存会话。
         runtime.uploads.cancel(principal, upload_id)
+        # 记录用户主动取消上传的审计事件。
         runtime.audit.record(
             "upload.cancel", actor=principal.name, source=_source(request), success=True, upload_id=upload_id
         )
+        # 204 表示取消成功且没有响应体。
         return Response(status_code=204)
+    # PATCH 请求必须用查询参数声明当前分块的起始偏移。
     offset_text = request.query_params.get("offset")
+    # 把 URL 中的文本偏移转换为整数。
     try:
         offset = int(offset_text or "")
+    # 缺失、空字符串或非数字内容都会进入这里。
     except ValueError as exc:
         raise InvalidPathError("offset 必须是非负整数") from exc
+    # 文件偏移不能位于文件起点之前。
     if offset < 0:
         raise InvalidPathError("offset 必须是非负整数")
+    # 严格客户端可在请求头中携带当前分块 SHA-256；浏览器快速模式没有该请求头。
     declared_sha256 = request.headers.get("x-chfs-chunk-sha256") or None
+    # 把认证信息、偏移和异步请求体流交给上传管理器。
     session = await runtime.uploads.append(
+        # 当前用户。
         principal,
+        # 目标上传会话。
         upload_id,
+        # 本分块的起始字节位置。
         offset,
+        # 可选的分块完整性摘要。
         declared_sha256,
+        # Starlette 按网络到达顺序异步产出的请求体字节流。
         request.stream(),
     )
+    # 分块成功写入后返回最新 offset，浏览器据此推进下一块。
     return JSONResponse(runtime.uploads.status_dict(session))
 
 
 async def complete_resumable_upload(request: Request) -> JSONResponse:
+    # 获取共享运行时对象。
     runtime = _runtime(request)
+    # 解析当前用户身份。
     principal = _principal(request)
+    # 从 /uploads/{upload_id}/complete 路由中取得会话 ID。
     upload_id = request.path_params["upload_id"]
+    # 读取完成请求的 JSON 对象；浏览器快速模式发送空对象。
     payload = await _json_object(request)
+    # 严格客户端可以提供所有分块摘要组成的清单哈希。
     manifest = payload.get("manifest_sha256")
+    # 清单哈希存在时必须是 64 字符的 SHA-256 十六进制文本。
     if manifest is not None and (not isinstance(manifest, str) or len(manifest) != 64):
         raise InvalidPathError("manifest_sha256 格式无效")
+    # 校验长度、刷新磁盘、原子发布文件，并取得最终哈希与文件元数据。
     entry, file_sha256, manifest_sha256 = runtime.uploads.complete(principal, upload_id, manifest)
+    # 文件真正发布成功后记录一次完整上传审计事件。
     runtime.audit.record(
+        # 审计事件类型。
         "file.upload",
+        # 上传者名称。
         actor=principal.name,
+        # 请求来源地址。
         source=_source(request),
+        # 执行到这里表示提交成功。
         success=True,
+        # 最终公开文件路径。
         path=entry.path,
+        # 最终文件字节数。
         size=entry.size,
+        # 服务端在接收过程中累计得到的完整文件 SHA-256。
         sha256=file_sha256,
+        # 标记本次上传使用的是可续传协议。
         resumable=True,
     )
+    # 先把 FileEntry 转换为供 API 返回的普通字典。
     result = entry.as_dict()
+    # 在文件元数据之外附加完整文件哈希和分块清单哈希。
     result.update({"sha256": file_sha256, "manifest_sha256": manifest_sha256})
+    # 201 表示最终文件资源已经成功创建。
     return JSONResponse(result, status_code=201)
 
 

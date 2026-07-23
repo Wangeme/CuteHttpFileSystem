@@ -40,17 +40,19 @@ from ..models import Permission
 from ..security import Account, hash_password
 from .controller import ServerController, discover_urls
 
-BG = "#111722"
-SIDEBAR = "#151d29"
-SURFACE = "#1b2533"
-SURFACE_ALT = "#222e3e"
-BORDER = "#314055"
-TEXT = "#ecf2f8"
-MUTED = "#94a3b8"
-ACCENT = "#2dd4bf"
-ACCENT_DARK = "#0f766e"
-DANGER = "#fb7185"
-WARNING = "#fbbf24"
+BG = "#070d13"
+SIDEBAR = "#090f15"
+SURFACE = "#0d151d"
+SURFACE_ALT = "#14212b"
+BORDER = "#30414d"
+TEXT = "#d8e1e7"
+MUTED = "#8da0ad"
+ACCENT = "#25d7d1"
+ACCENT_DARK = "#0d5d5a"
+RUNNING = "#39ff63"
+RUNNING_DARK = "#052d15"
+DANGER = "#ff6574"
+WARNING = "#9db6c2"
 
 
 class CHFSApplication(tk.Tk):
@@ -67,14 +69,21 @@ class CHFSApplication(tk.Tk):
 
         self.title("CHFS · HTTP 文件传输服务器")
         self._window_icon = tk.PhotoImage(file=Path(__file__).with_name("chfs-icon.png"))
+        self._status_waveform = tk.PhotoImage(file=Path(__file__).with_name("status-waveform.png"))
+        self._animated_waveform = tk.PhotoImage(
+            width=self._status_waveform.width(),
+            height=self._status_waveform.height(),
+        )
+        self._waveform_offset = 0
+        self._waveform_tick = 0
+        self._render_waveform_frame()
         self.iconphoto(True, self._window_icon)
         if os.name == "nt":
             try:
                 self.iconbitmap(default=str(Path(__file__).with_name("chfs.ico")))
             except tk.TclError:
                 pass
-        self.geometry("1120x720")
-        self.minsize(960, 640)
+        self._apply_optimal_geometry()
         self.configure(background=BG)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._configure_styles()
@@ -82,9 +91,24 @@ class CHFSApplication(tk.Tk):
         self._build_shell()
         self.show_page("overview")
         self.after(150, self._poll_server_state)
+        self.after(90, self._animate_status_waveform)
         if auto_start:
             # 等主窗口完成绘制后再启动，确保失败信息能够正常显示。
             self.after(250, self._start_server)
+
+    def _apply_optimal_geometry(self) -> None:
+        """按当前屏幕可用尺寸选择舒适窗口大小，并在每次启动时居中。"""
+
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        width = min(1440, max(920, screen_width - 96))
+        height = min(1024, max(680, screen_height - 120))
+        width = min(width, screen_width)
+        height = min(height, screen_height)
+        left = max(0, (screen_width - width) // 2)
+        top = max(0, (screen_height - height) // 2)
+        self.geometry(f"{width}x{height}+{left}+{top}")
+        self.minsize(min(1080, width), min(720, height))
 
     def _load_or_default(self) -> AppConfig:
         if self.config_path.exists():
@@ -116,26 +140,39 @@ class CHFSApplication(tk.Tk):
     def _configure_styles(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
-        default_font = ("Microsoft YaHei UI", 10)
+        default_font = ("Microsoft YaHei UI", 9)
         self.option_add("*Font", default_font)
-        style.configure(".", background=BG, foreground=TEXT, fieldbackground=SURFACE_ALT, bordercolor=BORDER)
+        style.configure(
+            ".",
+            background=BG,
+            foreground=TEXT,
+            fieldbackground=SURFACE_ALT,
+            bordercolor=BORDER,
+            lightcolor=BORDER,
+            darkcolor="#020508",
+        )
         style.configure("TFrame", background=BG)
         style.configure("Sidebar.TFrame", background=SIDEBAR)
-        style.configure("Surface.TFrame", background=SURFACE, relief="flat")
+        style.configure("Surface.TFrame", background=SURFACE, relief="solid", borderwidth=1)
+        style.configure("Running.TFrame", background=RUNNING_DARK, relief="solid", borderwidth=1)
         style.configure("TLabel", background=BG, foreground=TEXT)
         style.configure("Muted.TLabel", foreground=MUTED)
         style.configure("Surface.TLabel", background=SURFACE, foreground=TEXT)
-        style.configure("CardTitle.TLabel", background=SURFACE, foreground=MUTED, font=("Microsoft YaHei UI", 9))
+        style.configure("CardTitle.TLabel", background=SURFACE, foreground=MUTED, font=("Microsoft YaHei UI", 8))
         style.configure("Metric.TLabel", background=SURFACE, foreground=TEXT, font=("Microsoft YaHei UI", 18, "bold"))
-        style.configure("Title.TLabel", font=("Microsoft YaHei UI", 21, "bold"))
-        style.configure("Subtitle.TLabel", foreground=MUTED, font=("Microsoft YaHei UI", 10))
-        style.configure("Brand.TLabel", background=SIDEBAR, foreground=TEXT, font=("Microsoft YaHei UI", 17, "bold"))
-        style.configure("Nav.TButton", background=SIDEBAR, foreground=MUTED, padding=(18, 12), anchor="w", borderwidth=0)
+        style.configure("RunningMetric.TLabel", background=RUNNING_DARK, foreground=RUNNING, font=("Microsoft YaHei UI", 20, "bold"))
+        style.configure("RunningDetail.TLabel", background=RUNNING_DARK, foreground="#9afcaf", font=("Microsoft YaHei UI", 8))
+        style.configure("Title.TLabel", font=("Microsoft YaHei UI", 13, "bold"))
+        style.configure("Subtitle.TLabel", foreground=MUTED, font=("Microsoft YaHei UI", 9))
+        style.configure("Brand.TLabel", background=SIDEBAR, foreground=TEXT, font=("Cascadia Mono", 12, "bold"))
+        style.configure("Nav.TButton", background=SIDEBAR, foreground=MUTED, padding=(18, 10), anchor="w", borderwidth=0, font=("Microsoft YaHei UI", 9))
         style.map("Nav.TButton", background=[("active", SURFACE_ALT)], foreground=[("active", TEXT)])
-        style.configure("ActiveNav.TButton", background=SURFACE_ALT, foreground=ACCENT, padding=(18, 12), anchor="w", borderwidth=0, font=("Microsoft YaHei UI", 10, "bold"))
-        style.map("ActiveNav.TButton", background=[("active", SURFACE_ALT)], foreground=[("active", ACCENT)])
-        style.configure("Primary.TButton", background=ACCENT, foreground="#062a27", padding=(18, 10), borderwidth=0, font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("ActiveNav.TButton", background="#0c2a1a", foreground=RUNNING, padding=(18, 10), anchor="w", borderwidth=1, font=("Microsoft YaHei UI", 9, "bold"))
+        style.map("ActiveNav.TButton", background=[("active", "#103622")], foreground=[("active", RUNNING)])
+        style.configure("Primary.TButton", background=ACCENT, foreground="#062a27", padding=(18, 9), borderwidth=0, font=("Microsoft YaHei UI", 9, "bold"))
         style.map("Primary.TButton", background=[("active", "#5eead4"), ("disabled", BORDER)])
+        style.configure("Running.TButton", background="#0e6c2b", foreground="#d8ffe1", padding=(16, 9), borderwidth=1, font=("Microsoft YaHei UI", 9, "bold"))
+        style.map("Running.TButton", background=[("active", "#128438")])
         style.configure("Secondary.TButton", background=SURFACE_ALT, foreground=TEXT, padding=(14, 9), borderwidth=1)
         style.map("Secondary.TButton", background=[("active", BORDER)])
         style.configure("Compact.TButton", background=SURFACE_ALT, foreground=TEXT, padding=(7, 6), borderwidth=1)
@@ -146,18 +183,17 @@ class CHFSApplication(tk.Tk):
         style.configure("TCombobox", padding=8)
         style.configure("TCheckbutton", background=BG, foreground=TEXT)
         style.map("TCheckbutton", background=[("active", BG)])
-        style.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT, rowheight=34, borderwidth=0)
-        style.configure("Treeview.Heading", background=SURFACE_ALT, foreground=MUTED, padding=8, borderwidth=0)
+        style.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT, rowheight=25, borderwidth=0, font=("Cascadia Mono", 8))
+        style.configure("Treeview.Heading", background=SURFACE_ALT, foreground=MUTED, padding=6, borderwidth=1, font=("Microsoft YaHei UI", 8))
         style.map("Treeview", background=[("selected", ACCENT_DARK)])
 
     def _build_shell(self) -> None:
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
-        sidebar = ttk.Frame(self, style="Sidebar.TFrame", width=220)
+        sidebar = ttk.Frame(self, style="Sidebar.TFrame", width=185)
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.grid_propagate(False)
-        ttk.Label(sidebar, text="CHFS", style="Brand.TLabel").pack(anchor="w", padx=22, pady=(24, 2))
-        ttk.Label(sidebar, text="文件传输控制台", style="Muted.TLabel", background=SIDEBAR).pack(anchor="w", padx=22, pady=(0, 28))
+        ttk.Label(sidebar, text="CHFS 文件传输控制台", style="Brand.TLabel").pack(anchor="w", padx=18, pady=(22, 26))
         pages = [
             ("overview", "运行概览"),
             ("share", "共享与权限"),
@@ -172,9 +208,9 @@ class CHFSApplication(tk.Tk):
             button = ttk.Button(sidebar, text=label, style="Nav.TButton", command=lambda page=key: self.show_page(page))
             button.pack(fill="x", padx=10, pady=2)
             self.nav_buttons[key] = button
-        ttk.Label(sidebar, text="v0.1.0 · 内核已就绪", style="Muted.TLabel", background=SIDEBAR).pack(side="bottom", anchor="w", padx=22, pady=20)
+        ttk.Label(sidebar, text="CHFS v0.1.0\n安全 · 稳定 · 高效", style="Muted.TLabel", background=SIDEBAR, justify="left").pack(side="bottom", anchor="w", padx=18, pady=20)
 
-        self.content = ttk.Frame(self, padding=(30, 24))
+        self.content = ttk.Frame(self, padding=(22, 18))
         self.content.grid(row=0, column=1, sticky="nsew")
 
     def show_page(self, page: str) -> None:
@@ -208,150 +244,203 @@ class CHFSApplication(tk.Tk):
         return frame
 
     def _build_overview(self) -> None:
-        self._page_header("运行概览", "启动服务并把访问地址发给同一网络中的设备")
-        hero = self._surface(self.content, fill="x")
-        hero.columnconfigure(0, weight=1)
-        status = ttk.Frame(hero, style="Surface.TFrame")
+        header = ttk.Frame(self.content)
+        header.pack(fill="x", pady=(0, 10))
+        ttk.Label(header, text="运行概览", style="Title.TLabel").pack(side="left")
+        ttk.Label(
+            header,
+            text=datetime.now().strftime("%Y-%m-%d  %H:%M:%S"),
+            style="Muted.TLabel",
+            font=("Cascadia Mono", 9),
+        ).pack(side="right")
+
+        running = self.controller.state == "running"
+        hero_style = "Running.TFrame" if running else "Surface.TFrame"
+        hero = ttk.Frame(self.content, style=hero_style, padding=(20, 14))
+        hero.pack(fill="x")
+        hero.columnconfigure(1, weight=1)
+        self.status_panel = hero
+        status = ttk.Frame(hero, style=hero_style)
         status.grid(row=0, column=0, sticky="w")
-        ttk.Label(status, textvariable=self.status_var, style="Metric.TLabel").pack(anchor="w")
-        ttk.Label(status, textvariable=self.status_detail_var, style="Surface.TLabel").pack(anchor="w", pady=(5, 0))
-        self.toggle_button = ttk.Button(hero, text="启动服务", style="Primary.TButton", command=self._toggle_server)
-        self.toggle_button.grid(row=0, column=1, padx=(20, 0))
+        self.status_text_panel = status
+        self.status_value_label = ttk.Label(
+            status,
+            textvariable=self.status_var,
+            style="RunningMetric.TLabel" if running else "Metric.TLabel",
+        )
+        self.status_value_label.pack(anchor="w")
+        self.status_detail_label = ttk.Label(
+            status,
+            textvariable=self.status_detail_var,
+            style="RunningDetail.TLabel" if running else "Surface.TLabel",
+        )
+        self.status_detail_label.pack(anchor="w", pady=(4, 0))
+        self.waveform_label = tk.Label(
+            hero,
+            image=self._animated_waveform,
+            bg=RUNNING_DARK if running else SURFACE,
+            bd=0,
+        )
+        self.waveform_label.grid(row=0, column=1, sticky="e", padx=18)
+        if not running:
+            self.waveform_label.grid_remove()
+        self.toggle_button = ttk.Button(
+            hero,
+            text="停止服务" if running else "启动服务",
+            style="Running.TButton" if running else "Primary.TButton",
+            command=self._toggle_server,
+        )
+        self.toggle_button.grid(row=0, column=2, sticky="e")
 
-        # 高频配置收拢到一条状态栏中：用户无需跳页即可确认共享范围，并能快速
-        # 开关高风险的全盘访问。红色只用于危险操作，避免界面产生过多视觉噪声。
-        scope = ttk.Frame(self.content, style="Surface.TFrame", padding=(18, 14))
-        scope.pack(fill="x", pady=(14, 0))
-        scope.columnconfigure(0, weight=2)
-        scope.columnconfigure(1, weight=2)
-        scope.columnconfigure(2, weight=1)
-        scope.columnconfigure(3, weight=0)
-        scope_name = "本机所有可用磁盘" if self.full_disk_var.get() else (Path(self.root_var.get()).name or self.root_var.get())
-        for column, (label, value) in enumerate(
-            (("共享范围", scope_name), ("访客权限", self._guest_summary()), ("账户", f"{len(self.accounts)} 个"))
-        ):
-            cell = ttk.Frame(scope, style="Surface.TFrame")
-            cell.grid(row=0, column=column, sticky="w", padx=(0, 28))
-            ttk.Label(cell, text=label, style="CardTitle.TLabel").pack(anchor="w")
-            ttk.Label(cell, text=value, style="Surface.TLabel", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", pady=(4, 0))
-        if self.full_disk_var.get():
-            ttk.Button(scope, text="关闭全盘访问", style="Secondary.TButton", command=self._toggle_full_disk_access).grid(
-                row=0, column=3, sticky="e"
-            )
-        else:
-            ttk.Button(scope, text="开放全盘访问", style="Danger.TButton", command=self._toggle_full_disk_access).grid(
-                row=0, column=3, sticky="e"
-            )
+        upper = ttk.Frame(self.content)
+        upper.pack(fill="x", pady=(12, 0))
+        upper.columnconfigure(0, weight=1)
+        upper.columnconfigure(1, weight=1)
+        self._overview_upper = upper
 
-        workspace = ttk.Frame(self.content)
-        workspace.pack(fill="both", expand=True, pady=(14, 0))
-        workspace.columnconfigure(0, weight=2)
-        workspace.columnconfigure(1, weight=1)
-        workspace.rowconfigure(0, weight=1)
-
-        addresses = ttk.Frame(workspace, style="Surface.TFrame", padding=18)
-        addresses.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
-        ttk.Label(addresses, text="访问地址", style="Surface.TLabel", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
-        ttk.Label(addresses, text="悬停地址可切换二维码，手机扫码即可打开", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 12))
+        addresses = ttk.Frame(upper, style="Surface.TFrame", padding=16)
+        self._overview_addresses = addresses
+        addresses.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        ttk.Label(addresses, text="访问地址", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(addresses, text="左键打开 · 右键复制 · 悬停切换二维码", style="CardTitle.TLabel").pack(anchor="w", pady=(3, 10))
         urls = discover_urls(
             self.host_var.get(),
             self._safe_int(self.port_var.get(), 8080),
             https=bool(self.tls_cert_var.get() and self.tls_key_var.get()),
         )
         body = ttk.Frame(addresses, style="Surface.TFrame")
-        body.pack(fill="both", expand=True)
+        body.pack(fill="x", expand=True)
         body.columnconfigure(0, weight=1)
-        body.rowconfigure(0, weight=1)
-
-        list_host = ttk.Frame(body, style="Surface.TFrame")
-        list_host.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
-        list_host.columnconfigure(0, weight=1)
-        list_host.rowconfigure(0, weight=1)
-        canvas = tk.Canvas(list_host, bg=SURFACE, highlightthickness=0, height=205)
-        scrollbar = ttk.Scrollbar(list_host, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        address_list = ttk.Frame(canvas, style="Surface.TFrame")
-        window_id = canvas.create_window((0, 0), window=address_list, anchor="nw")
-        address_list.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
-
-        def scroll_addresses(event: tk.Event[tk.Misc]) -> str:
-            """让滚轮在地址文字、行和按钮上都能控制外层画布。"""
-
-            steps = -1 if event.delta > 0 else 1
-            canvas.yview_scroll(steps, "units")
-            return "break"
-
-        def start_middle_drag(_event: tk.Event[tk.Misc]) -> str:
-            y = self.winfo_pointery() - canvas.winfo_rooty()
-            canvas.scan_mark(0, y)
-            return "break"
-
-        def move_middle_drag(_event: tk.Event[tk.Misc]) -> str:
-            y = self.winfo_pointery() - canvas.winfo_rooty()
-            canvas.scan_dragto(0, y, gain=1)
-            return "break"
-
-        def bind_address_scrolling(widget: tk.Misc) -> None:
-            widget.bind("<MouseWheel>", scroll_addresses)
-            widget.bind("<ButtonPress-2>", start_middle_drag)
-            widget.bind("<B2-Motion>", move_middle_drag)
-
-        bind_address_scrolling(canvas)
-        bind_address_scrolling(address_list)
-
-        body.columnconfigure(1, minsize=145)
-        qr_panel = ttk.Frame(body, style="Surface.TFrame", width=145)
+        address_list = ttk.Frame(body, style="Surface.TFrame")
+        address_list.grid(row=0, column=0, sticky="ew", padx=(0, 14))
+        body.columnconfigure(1, minsize=116)
+        qr_panel = ttk.Frame(body, style="Surface.TFrame", width=116)
         qr_panel.grid(row=0, column=1, sticky="ne")
         ttk.Label(qr_panel, text="扫码访问", style="CardTitle.TLabel").pack(anchor="center", pady=(0, 7))
         self.qr_label = tk.Label(qr_panel, bg="#ffffff", bd=0)
         self.qr_label.pack(anchor="center")
 
-        for url in urls:
-            row = ttk.Frame(address_list, style="Surface.TFrame", padding=(0, 3))
+        for index, url in enumerate(urls):
+            row = ttk.Frame(address_list, style="Surface.TFrame", padding=(10, 7))
             row.pack(fill="x")
+            ttk.Label(
+                row,
+                text="局域网地址" if index == 0 and "127.0.0.1" not in url else "本机地址",
+                style="CardTitle.TLabel",
+                width=7,
+            ).pack(side="left")
             url_label = tk.Label(
                 row,
                 text=url,
                 bg=SURFACE,
-                fg=TEXT,
-                font=("Cascadia Mono", 9),
+                fg=ACCENT,
+                cursor="hand2",
+                font=("Cascadia Mono", 9, "underline"),
                 anchor="w",
                 justify="left",
-                wraplength=210,
             )
             url_label.pack(side="left", fill="x", expand=True)
-            copy_button = ttk.Button(row, text="复制", width=4, style="Compact.TButton", command=lambda value=url: self._copy(value))
-            copy_button.pack(side="right")
-            open_button = ttk.Button(row, text="打开", width=4, style="Compact.TButton", command=lambda value=url: webbrowser.open(value))
-            open_button.pack(side="right", padx=5)
-            for widget in (row, url_label, copy_button, open_button):
-                bind_address_scrolling(widget)
+            url_label.bind("<Button-1>", lambda _event, value=url: webbrowser.open(value))
+            url_label.bind("<Button-3>", lambda _event, value=url: self._copy(value))
             row.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
             url_label.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
+            if index < len(urls) - 1:
+                ttk.Separator(address_list, orient="horizontal").pack(fill="x")
         if urls:
             preferred = next((item for item in urls if "192.168." in item or "10." in item or "172." in item), urls[0])
             self._show_qr(preferred)
 
-        logs = ttk.Frame(workspace, style="Surface.TFrame", padding=18)
-        logs.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
-        logs.columnconfigure(0, weight=1)
-        logs.rowconfigure(2, weight=1)
-        log_header = ttk.Frame(logs, style="Surface.TFrame")
-        log_header.grid(row=0, column=0, sticky="ew")
-        ttk.Label(log_header, text="最近操作", style="Surface.TLabel", font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
-        ttk.Button(log_header, text="查看全部", width=7, style="Compact.TButton", command=lambda: self.show_page("logs")).pack(side="right")
-        ttk.Label(
-            logs,
-            text="操作日志与审计日志使用同一份记录",
-            style="CardTitle.TLabel",
-            wraplength=225,
-        ).grid(row=1, column=0, sticky="w", pady=(4, 12))
-        self.overview_log_host = ttk.Frame(logs, style="Surface.TFrame")
-        self.overview_log_host.grid(row=2, column=0, sticky="nsew")
+        service = ttk.Frame(upper, style="Surface.TFrame", padding=16)
+        self._overview_service = service
+        service.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        service_header = ttk.Frame(service, style="Surface.TFrame")
+        service_header.pack(fill="x", pady=(0, 7))
+        ttk.Label(service_header, text="服务概览", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
+        ttk.Button(
+            service_header,
+            text="打开此电脑" if self.full_disk_var.get() else "打开目录",
+            width=9,
+            style="Compact.TButton",
+            command=self._open_share_location,
+        ).pack(side="right")
+        root_name = "本机所有可用磁盘" if self.full_disk_var.get() else (Path(self.root_var.get()).name or self.root_var.get())
+        service_rows = (
+            ("服务名称", "CHFS 文件传输服务"),
+            ("监听端口", self.port_var.get()),
+            ("根目录", root_name),
+            ("访客权限", self._guest_summary()),
+            ("账户", f"{len(self.accounts)} 个"),
+        )
+        for index, (label, value) in enumerate(service_rows):
+            row = ttk.Frame(service, style="Surface.TFrame")
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=label, style="CardTitle.TLabel", width=10).pack(side="left")
+            ttk.Label(
+                row,
+                text=value,
+                style="Surface.TLabel",
+                font=("Cascadia Mono", 9) if label in {"监听端口", "账户"} else ("Microsoft YaHei UI", 9),
+            ).pack(side="left", fill="x", expand=True)
+            if index < len(service_rows) - 1:
+                ttk.Separator(service, orient="horizontal").pack(fill="x")
+        disk_button = ttk.Button(
+            service,
+            text="关闭全盘访问" if self.full_disk_var.get() else "开放全盘访问",
+            style="Secondary.TButton" if self.full_disk_var.get() else "Danger.TButton",
+            command=self._toggle_full_disk_access,
+        )
+        disk_button.pack(anchor="e", pady=(8, 0))
+
+        upper.bind("<Configure>", self._reflow_overview)
+
+        recent = ttk.Frame(self.content, style="Surface.TFrame", padding=(14, 10))
+        recent.pack(fill="both", expand=True, pady=(12, 0))
+        recent.columnconfigure(0, weight=1)
+        recent.rowconfigure(1, weight=1)
+        recent_header = ttk.Frame(recent, style="Surface.TFrame")
+        recent_header.grid(row=0, column=0, sticky="ew", pady=(0, 7))
+        ttk.Label(recent_header, text="最近操作（最新 10 条）", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
+        ttk.Button(recent_header, text="刷新", width=6, style="Compact.TButton", command=self._load_overview_logs).pack(side="right")
+        ttk.Button(recent_header, text="查看全部", width=7, style="Compact.TButton", command=lambda: self.show_page("logs")).pack(side="right", padx=(0, 6))
+        columns = ("time", "actor", "action", "ip", "mac", "result")
+        self.overview_log_tree = ttk.Treeview(
+            recent,
+            columns=columns,
+            displaycolumns=columns,
+            show="headings",
+            selectmode="browse",
+            height=10,
+        )
+        headings = {"time": "时间", "actor": "用户", "action": "操作 / 文件", "ip": "来源 IP", "mac": "设备标识", "result": "结果"}
+        # 以 1120px 窗口为下限安排列宽；更宽时把额外空间交给“操作 / 文件”列。
+        widths = {"time": 125, "actor": 70, "action": 330, "ip": 110, "mac": 125, "result": 60}
+        for name in columns:
+            self.overview_log_tree.heading(name, text=headings[name])
+            self.overview_log_tree.column(name, width=widths[name], minwidth=24, stretch=False)
+        overview_scroll = ttk.Scrollbar(recent, orient="vertical", command=self.overview_log_tree.yview)
+        self.overview_log_tree.configure(yscrollcommand=overview_scroll.set)
+        self.overview_log_tree.grid(row=1, column=0, sticky="nsew")
+        overview_scroll.grid(row=1, column=1, sticky="ns")
         self._load_overview_logs()
+
+    def _reflow_overview(self, event: tk.Event[tk.Misc]) -> None:
+        """窄窗口改为上下排列，宽窗口保持视觉稿的双栏结构。"""
+
+        # 常用桌面宽度应保持双栏；只有真正狭窄时才退化成上下排列。
+        stacked = event.width < 700
+        if getattr(self, "_overview_stacked", None) == stacked:
+            return
+        self._overview_stacked = stacked
+        if stacked:
+            self._overview_upper.columnconfigure(0, weight=1)
+            self._overview_upper.columnconfigure(1, weight=0)
+            self._overview_addresses.grid_configure(row=0, column=0, padx=0, pady=(0, 6))
+            self._overview_service.grid_configure(row=1, column=0, padx=0, pady=(6, 0))
+        else:
+            self._overview_upper.columnconfigure(0, weight=1)
+            self._overview_upper.columnconfigure(1, weight=1)
+            self._overview_addresses.grid_configure(row=0, column=0, padx=(0, 6), pady=0)
+            self._overview_service.grid_configure(row=0, column=1, padx=(6, 0), pady=0)
 
     def _build_share(self) -> None:
         self._page_header("共享与权限", "设置可访问目录、上传限制和访客默认能力")
@@ -520,7 +609,15 @@ class CHFSApplication(tk.Tk):
         columns = ("time", "actor", "action", "ip", "mac", "result")
         holder = ttk.Frame(self.content)
         holder.pack(fill="both", expand=True)
-        self.log_tree = ttk.Treeview(holder, columns=columns, show="headings", selectmode="browse")
+        holder.columnconfigure(0, weight=1)
+        holder.rowconfigure(0, weight=1)
+        self.log_tree = ttk.Treeview(
+            holder,
+            columns=columns,
+            displaycolumns=columns,
+            show="headings",
+            selectmode="browse",
+        )
         headings = {
             "time": "时间",
             "actor": "用户",
@@ -529,14 +626,28 @@ class CHFSApplication(tk.Tk):
             "mac": "MAC 地址",
             "result": "结果",
         }
+        self.log_headings = headings
+        self.log_sort_reverse: dict[str, bool] = {}
+        self._log_drag_column: str | None = None
+        self._log_drag_start_x = 0
+        self._log_drag_moved = False
         widths = {"time": 146, "actor": 62, "action": 238, "ip": 116, "mac": 138, "result": 58}
+        min_widths = {"time": 48, "actor": 32, "action": 24, "ip": 48, "mac": 48, "result": 32}
         for name in columns:
             self.log_tree.heading(name, text=headings[name])
-            self.log_tree.column(name, width=widths[name], minwidth=60, stretch=name == "action")
-        scrollbar = ttk.Scrollbar(holder, orient="vertical", command=self.log_tree.yview)
-        self.log_tree.configure(yscrollcommand=scrollbar.set)
-        self.log_tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+            self.log_tree.column(name, width=widths[name], minwidth=min_widths[name], stretch=False)
+        vertical_scrollbar = ttk.Scrollbar(holder, orient="vertical", command=self.log_tree.yview)
+        horizontal_scrollbar = ttk.Scrollbar(holder, orient="horizontal", command=self.log_tree.xview)
+        self.log_tree.configure(
+            yscrollcommand=vertical_scrollbar.set,
+            xscrollcommand=horizontal_scrollbar.set,
+        )
+        self.log_tree.grid(row=0, column=0, sticky="nsew")
+        vertical_scrollbar.grid(row=0, column=1, sticky="ns")
+        horizontal_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.log_tree.bind("<ButtonPress-1>", self._on_log_header_press)
+        self.log_tree.bind("<B1-Motion>", self._on_log_header_drag)
+        self.log_tree.bind("<ButtonRelease-1>", self._on_log_header_release)
         self._load_logs()
 
     def _field_label(self, parent: tk.Misc, title: str, help_text: str, *, row: int | None = None, column: int = 0) -> None:
@@ -660,10 +771,11 @@ class CHFSApplication(tk.Tk):
                 if self.full_disk_var.get():
                     self.status_detail_var.set("高风险：访客可访问本机所有可用磁盘")
                 elif self.host_var.get().strip() in {"127.0.0.1", "::1", "localhost"}:
-                    self.status_detail_var.set("服务仅监听本机，请使用下方地址")
+                    self.status_detail_var.set("本机文件服务在线")
                 else:
-                    self.status_detail_var.set("可从局域网设备打开下方地址")
-                self.toggle_button.configure(text="停止服务", style="Danger.TButton")
+                    self.status_detail_var.set("局域网文件服务在线")
+                self.toggle_button.configure(text="停止服务", style="Running.TButton")
+                self._apply_overview_status_style(running=True)
             elif state == "stopped":
                 if self.controller.last_error:
                     self.status_var.set("启动失败")
@@ -672,6 +784,7 @@ class CHFSApplication(tk.Tk):
                     self.status_var.set("已关闭")
                     self.status_detail_var.set("配置就绪，启动后即可在浏览器访问")
                 self.toggle_button.configure(text="启动服务", style="Primary.TButton")
+                self._apply_overview_status_style(running=False)
             elif state == "starting":
                 self.status_var.set("正在启动")
                 self.status_detail_var.set("正在绑定监听地址，请稍候…")
@@ -685,6 +798,53 @@ class CHFSApplication(tk.Tk):
         if self._active_page == "transfers":
             self._refresh_transfers()
         self.after(200, self._poll_server_state)
+
+    def _apply_overview_status_style(self, *, running: bool) -> None:
+        """同步概览页运行条的颜色和波形，避免状态文字与视觉反馈不一致。"""
+
+        panel = getattr(self, "status_panel", None)
+        text_panel = getattr(self, "status_text_panel", None)
+        value_label = getattr(self, "status_value_label", None)
+        detail_label = getattr(self, "status_detail_label", None)
+        waveform = getattr(self, "waveform_label", None)
+        if panel is None or not panel.winfo_exists():
+            return
+        panel.configure(style="Running.TFrame" if running else "Surface.TFrame")
+        text_panel.configure(style="Running.TFrame" if running else "Surface.TFrame")
+        value_label.configure(style="RunningMetric.TLabel" if running else "Metric.TLabel")
+        detail_label.configure(style="RunningDetail.TLabel" if running else "Surface.TLabel")
+        waveform.configure(bg=RUNNING_DARK if running else SURFACE)
+        if running:
+            waveform.grid()
+        else:
+            waveform.grid_remove()
+
+    def _render_waveform_frame(self) -> None:
+        """从波形纹理生成循环平移帧，保持像素质感且不反复创建图片对象。"""
+
+        source = self._status_waveform
+        target = self._animated_waveform
+        width = source.width()
+        height = source.height()
+        offset = self._waveform_offset % width
+        target.blank()
+        if offset == 0:
+            target.tk.call(str(target), "copy", str(source), "-from", 0, 0, width, height, "-to", 0, 0)
+            return
+        target.tk.call(str(target), "copy", str(source), "-from", offset, 0, width, height, "-to", 0, 0)
+        target.tk.call(str(target), "copy", str(source), "-from", 0, 0, offset, height, "-to", width - offset, 0)
+
+    def _animate_status_waveform(self) -> None:
+        """运行时让状态波形以不完全匀速的节奏向前跳动。"""
+
+        if self.controller.state == "running":
+            steps = (3, 4, 3, 6, 2, 5, 3, 4)
+            self._waveform_offset = (
+                self._waveform_offset + steps[self._waveform_tick % len(steps)]
+            ) % self._status_waveform.width()
+            self._waveform_tick += 1
+            self._render_waveform_frame()
+        self.after(90, self._animate_status_waveform)
 
     def _refresh_transfers(self) -> None:
         tree = getattr(self, "transfer_tree", None)
@@ -726,7 +886,7 @@ class CHFSApplication(tk.Tk):
         code.add_data(url)
         code.make(fit=True)
         matrix = code.get_matrix()
-        scale = max(3, 168 // len(matrix))
+        scale = max(3, 132 // len(matrix))
         size = len(matrix) * scale
         image = tk.PhotoImage(width=size, height=size)
         image.put("#ffffff", to=(0, 0, size, size))
@@ -743,6 +903,23 @@ class CHFSApplication(tk.Tk):
         selected = filedialog.askdirectory(initialdir=self.root_var.get(), title="选择共享目录")
         if selected:
             self.root_var.set(selected)
+
+    def _open_share_location(self) -> None:
+        """使用系统文件管理器打开当前实际共享位置。"""
+
+        try:
+            if self.full_disk_var.get():
+                # 全盘模式没有唯一共享目录，因此打开“此电脑”。
+                subprocess.Popen(["explorer.exe", "shell:MyComputerFolder"])
+                return
+            path = Path(self.root_var.get()).expanduser().resolve()
+            path.mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(path)
+            else:
+                webbrowser.open(path.as_uri())
+        except OSError as exc:
+            messagebox.showerror("无法打开目录", str(exc))
 
     def _choose_tls_file(self, variable: tk.StringVar, title: str) -> None:
         selected = filedialog.askopenfilename(
@@ -793,43 +970,86 @@ class CHFSApplication(tk.Tk):
         for event in events:
             tree.insert("", "end", values=self._audit_row_values(event))
 
-    def _load_overview_logs(self) -> None:
-        """在概览页显示少量人类可读的操作记录，完整字段仍留在审计页。"""
+    def _sort_log_column(self, column: str) -> None:
+        """按当前列排序，并在表头显示升降序方向。"""
 
-        host = getattr(self, "overview_log_host", None)
-        if host is None or not host.winfo_exists():
+        reverse = self.log_sort_reverse.get(column, False)
+        rows = [(self.log_tree.set(item, column), item) for item in self.log_tree.get_children()]
+        rows.sort(key=lambda row: row[0].casefold(), reverse=reverse)
+        for index, (_value, item) in enumerate(rows):
+            self.log_tree.move(item, "", index)
+        for name, title in self.log_headings.items():
+            self.log_tree.heading(name, text=title)
+        self.log_tree.heading(column, text=f"{self.log_headings[column]} {'▼' if reverse else '▲'}")
+        self.log_sort_reverse[column] = not reverse
+
+    def _log_display_columns(self) -> list[str]:
+        """返回当前可见列顺序，供表头拖放逻辑使用。"""
+
+        displayed = tuple(self.log_tree["displaycolumns"])
+        return list(self.log_tree["columns"]) if displayed == ("#all",) else list(displayed)
+
+    def _on_log_header_press(self, event: tk.Event[tk.Misc]) -> str | None:
+        """记录被按下的表头；分隔线保留原生列宽调整行为。"""
+
+        self._log_drag_column = None
+        self._log_drag_moved = False
+        if self.log_tree.identify_region(event.x, event.y) != "heading":
+            return None
+        try:
+            index = int(self.log_tree.identify_column(event.x).removeprefix("#")) - 1
+            self._log_drag_column = self._log_display_columns()[index]
+            self._log_drag_start_x = event.x
+        except (ValueError, IndexError):
+            self._log_drag_column = None
+            return None
+        # 阻止 Treeview 的类级表头行为抢走拖动；分隔线仍由原生逻辑负责缩放。
+        return "break"
+
+    def _on_log_header_drag(self, event: tk.Event[tk.Misc]) -> str | None:
+        """把被拖动的表头插入鼠标当前所在的列位置。"""
+
+        if self._log_drag_column is None or abs(event.x - self._log_drag_start_x) < 6:
+            return None
+        if self.log_tree.identify_region(event.x, event.y) != "heading":
+            return None
+        try:
+            target_index = int(self.log_tree.identify_column(event.x).removeprefix("#")) - 1
+            columns = self._log_display_columns()
+            source_index = columns.index(self._log_drag_column)
+            if target_index == source_index:
+                return "break"
+            column = columns.pop(source_index)
+            columns.insert(target_index, column)
+        except (ValueError, IndexError):
+            return None
+        self.log_tree["displaycolumns"] = tuple(columns)
+        self._log_drag_moved = True
+        return "break"
+
+    def _on_log_header_release(self, event: tk.Event[tk.Misc]) -> str | None:
+        """短按表头排序；拖动表头时只改变列顺序。"""
+
+        column = self._log_drag_column
+        dragged = self._log_drag_moved
+        self._log_drag_column = None
+        self._log_drag_moved = False
+        if column is None:
+            return None
+        if not dragged and self.log_tree.identify_region(event.x, event.y) == "heading":
+            self._sort_log_column(column)
+        return "break"
+
+    def _load_overview_logs(self) -> None:
+        """在概览页使用单行表格显示最新十条操作记录。"""
+
+        tree = getattr(self, "overview_log_tree", None)
+        if tree is None or not tree.winfo_exists():
             return
-        for child in host.winfo_children():
-            child.destroy()
-        events = self._read_audit_events(limit=3)
-        if not events:
-            ttk.Label(host, text="暂无操作记录", style="Surface.TLabel", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", pady=(12, 4))
-            ttk.Label(host, text="上传、下载或删除文件后会显示在这里", style="CardTitle.TLabel", wraplength=260).pack(anchor="w")
-            return
-        for index, event in enumerate(events):
-            row = ttk.Frame(host, style="Surface.TFrame", padding=(0, 8))
-            row.pack(fill="x")
-            title = ttk.Frame(row, style="Surface.TFrame")
-            title.pack(fill="x")
-            action = self._audit_action_text(event)
-            if len(action) > 28:
-                action = f"{action[:25]}…"
-            ttk.Label(
-                title,
-                text=action,
-                style="Surface.TLabel",
-                font=("Microsoft YaHei UI", 9, "bold"),
-                wraplength=175,
-            ).pack(
-                side="left", fill="x", expand=True
-            )
-            result_color = ACCENT if event.get("success") else DANGER
-            tk.Label(title, text="成功" if event.get("success") else "失败", bg=SURFACE, fg=result_color, font=("Microsoft YaHei UI", 8, "bold")).pack(side="right")
-            source = event.get("source_ip", event.get("source", "-"))
-            summary = f"{self._format_audit_time(str(event.get('timestamp', '')))}  ·  {source}"
-            ttk.Label(row, text=summary, style="CardTitle.TLabel").pack(anchor="w", pady=(3, 0))
-            if index < len(events) - 1:
-                ttk.Separator(host, orient="horizontal").pack(fill="x")
+        for item in tree.get_children():
+            tree.delete(item)
+        for event in self._read_audit_events(limit=10):
+            tree.insert("", "end", values=self._audit_row_values(event))
 
     def _read_audit_events(self, *, limit: int) -> list[dict[str, object]]:
         """读取最近的结构化审计事件；损坏行不会影响其余日志展示。"""
