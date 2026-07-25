@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from chfs.errors import IntegrityMismatchError, UploadTooLargeError
+from chfs.errors import IntegrityMismatchError, ResourceConflictError, UploadTooLargeError
 from chfs.models import Permission, Principal
 from chfs.paths import SafePathResolver
 from chfs.services import bytes_chunks
@@ -101,6 +103,136 @@ class ResumableUploadManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.size, len(content))
         self.assertEqual(file_hash, hashlib.sha256(content).hexdigest())
         self.assertEqual((self.root / "fast.bin").read_bytes(), content)
+
+    async def test_request_body_is_written_incrementally(self) -> None:
+        """消费下一个网络小块前，前一个小块应已写入临时文件。"""
+
+        first = b"first-part"
+        second = b"second-part"
+        session = self.manager.create(
+            self.principal,
+            "streamed.bin",
+            len(first) + len(second),
+            "resume-streamed",
+        )
+
+        async def network_chunks():
+            yield first
+            self.assertEqual(session.temporary.read_bytes(), first)
+            yield second
+
+        await self.manager.append(
+            self.principal,
+            session.upload_id,
+            0,
+            None,
+            network_chunks(),
+        )
+        self.assertEqual(session.temporary.read_bytes(), first + second)
+
+    async def test_oversized_stream_rolls_back_file_and_hash(self) -> None:
+        """流式请求越界时不得留下尾部数据，也不得污染完整文件哈希。"""
+
+        session = self.manager.create(self.principal, "rollback.bin", 16, "resume-rollback")
+        with patch("chfs.uploads.MAX_CHUNK_SIZE", 8):
+            with self.assertRaises(UploadTooLargeError):
+                await self.manager.append(
+                    self.principal,
+                    session.upload_id,
+                    0,
+                    None,
+                    bytes_chunks([b"12345", b"6789"]),
+                )
+        self.assertEqual(session.offset, 0)
+        self.assertEqual(session.temporary.read_bytes(), b"")
+
+        content = b"abcdefghABCDEFGH"
+        await self.manager.append(
+            self.principal,
+            session.upload_id,
+            0,
+            None,
+            bytes_chunks([content]),
+        )
+        _entry, file_hash, _manifest = self.manager.complete(self.principal, session.upload_id, None)
+        self.assertEqual(file_hash, hashlib.sha256(content).hexdigest())
+
+    async def test_concurrent_chunks_cannot_interleave(self) -> None:
+        """同一会话的第二个请求必须等待，并在锁内重新检查 offset。"""
+
+        session = self.manager.create(self.principal, "ordered.bin", 8, "resume-ordered")
+        first_part_written = asyncio.Event()
+        release_first_request = asyncio.Event()
+
+        async def slow_request():
+            yield b"aaaa"
+            first_part_written.set()
+            await release_first_request.wait()
+            yield b"bbbb"
+
+        first_task = asyncio.create_task(
+            self.manager.append(self.principal, session.upload_id, 0, None, slow_request())
+        )
+        await first_part_written.wait()
+        second_task = asyncio.create_task(
+            self.manager.append(
+                self.principal,
+                session.upload_id,
+                0,
+                None,
+                bytes_chunks([b"XXXXXXXX"]),
+            )
+        )
+        release_first_request.set()
+        await first_task
+        with self.assertRaises(ResourceConflictError):
+            await second_task
+        self.assertEqual(session.offset, 8)
+        self.assertEqual(session.temporary.read_bytes(), b"aaaabbbb")
+
+    async def test_cancelled_request_rolls_back_before_retry(self) -> None:
+        """客户端断线取消协程后，已流入磁盘的数据必须先回滚再允许重试。"""
+
+        content = b"retry-after-cancel"
+        session = self.manager.create(
+            self.principal,
+            "cancelled-request.bin",
+            len(content),
+            "resume-cancelled-request",
+        )
+        first_part_written = asyncio.Event()
+        wait_forever = asyncio.Event()
+
+        async def interrupted_request():
+            yield content[:5]
+            first_part_written.set()
+            await wait_forever.wait()
+
+        task = asyncio.create_task(
+            self.manager.append(
+                self.principal,
+                session.upload_id,
+                0,
+                None,
+                interrupted_request(),
+            )
+        )
+        await first_part_written.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(session.offset, 0)
+        self.assertEqual(session.temporary.read_bytes(), b"")
+
+        await self.manager.append(
+            self.principal,
+            session.upload_id,
+            0,
+            None,
+            bytes_chunks([content]),
+        )
+        _entry, file_hash, _manifest = self.manager.complete(self.principal, session.upload_id, None)
+        self.assertEqual(file_hash, hashlib.sha256(content).hexdigest())
 
 
 if __name__ == "__main__":

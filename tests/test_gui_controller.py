@@ -27,6 +27,12 @@ class ServerControllerTests(unittest.TestCase):
             self.assertFalse(controller.start(config), "运行中不能重复启动")
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=3) as response:
                 self.assertEqual(response.status, 200)
+            saved = controller.update_shared_text("桌面与手机同步")
+            self.assertEqual(saved["revision"], 1)
+            self.assertEqual(controller.read_shared_text()["text"], "桌面与手机同步")
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/shared-text", timeout=3) as response:
+                self.assertEqual(response.status, 200)
+                self.assertIn("桌面与手机同步", response.read().decode("utf-8"))
             self.assertTrue(controller.stop())
             self.assertEqual(controller.state, "stopped")
             self.assertIn("starting", states)

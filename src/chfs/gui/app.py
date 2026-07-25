@@ -66,6 +66,12 @@ class CHFSApplication(tk.Tk):
         self._state_events: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.controller = ServerController(self._state_events.put)
         self._active_page = "overview"
+        self._auto_save_after_id: str | None = None
+        self._auto_save_suspended = False
+        self._shared_text_save_after_id: str | None = None
+        self._pending_config_restart = False
+        self._restart_stop_requested = False
+        self._closing = False
 
         self.title("CHFS · HTTP 文件传输服务器")
         self._window_icon = tk.PhotoImage(file=Path(__file__).with_name("chfs-icon.png"))
@@ -88,6 +94,7 @@ class CHFSApplication(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._configure_styles()
         self._create_variables()
+        self._bind_auto_save_variables()
         self._build_shell()
         self.show_page("overview")
         self.after(150, self._poll_server_state)
@@ -134,8 +141,53 @@ class CHFSApplication(tk.Tk):
         self.write_var = tk.BooleanVar(value=Permission.WRITE in self.config.guest_permissions)
         self.delete_var = tk.BooleanVar(value=Permission.DELETE in self.config.guest_permissions)
         self.full_disk_var = tk.BooleanVar(value=self.config.full_disk_access)
+        self._allow_network_draft = tuple(self.config.allow_networks)
+        self._deny_network_draft = tuple(self.config.deny_networks)
+        self.auto_save_status_var = tk.StringVar(value="更改将自动保存并应用")
         self.status_var = tk.StringVar(value="已关闭")
         self.status_detail_var = tk.StringVar(value="配置就绪，启动后即可在浏览器访问")
+
+    def _bind_auto_save_variables(self) -> None:
+        """监听所有表单变量，用户停止输入后统一保存，避免逐键重启服务。"""
+
+        variables = (
+            self.root_var,
+            self.host_var,
+            self.port_var,
+            self.max_mb_var,
+            self.ttl_hours_var,
+            self.tls_cert_var,
+            self.tls_key_var,
+            self.read_var,
+            self.write_var,
+            self.delete_var,
+            self.full_disk_var,
+        )
+        for variable in variables:
+            variable.trace_add("write", self._on_config_variable_changed)
+
+    def _on_config_variable_changed(self, *_args: object) -> None:
+        if not self._auto_save_suspended:
+            self._schedule_auto_save()
+
+    def _schedule_auto_save(self, *, delay_ms: int = 700) -> None:
+        """防抖保存：连续输入期间只保留最后一次保存任务。"""
+
+        if self._closing:
+            return
+        if self._auto_save_after_id is not None:
+            self.after_cancel(self._auto_save_after_id)
+        self.auto_save_status_var.set("检测到更改，等待自动保存…")
+        self._auto_save_after_id = self.after(delay_ms, self._run_auto_save)
+
+    def _cancel_scheduled_auto_save(self) -> None:
+        if self._auto_save_after_id is not None:
+            self.after_cancel(self._auto_save_after_id)
+            self._auto_save_after_id = None
+
+    def _run_auto_save(self) -> None:
+        self._auto_save_after_id = None
+        self._save_config(quiet=True, restart_running=True, automatic=True)
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self)
@@ -214,11 +266,15 @@ class CHFSApplication(tk.Tk):
         self.content.grid(row=0, column=1, sticky="nsew")
 
     def show_page(self, page: str) -> None:
+        if page != "overview" and getattr(self, "_shared_text_dirty", False):
+            self._save_shared_text()
         self._active_page = page
         if page != "transfers":
             self.transfer_tree = None
         if page != "overview":
             self.toggle_button = None
+        if page != "overview":
+            self.shared_text_widget = None
         for key, button in self.nav_buttons.items():
             button.configure(style="ActiveNav.TButton" if key == page else "Nav.TButton")
         for child in self.content.winfo_children():
@@ -393,15 +449,20 @@ class CHFSApplication(tk.Tk):
 
         upper.bind("<Configure>", self._reflow_overview)
 
+        shared_text = ttk.Frame(self.content, style="Surface.TFrame", padding=(14, 10), height=170)
+        shared_text.pack(fill="x", pady=(12, 0))
+        shared_text.pack_propagate(False)
+        self._overview_shared_text = shared_text
+        self._build_overview_shared_text(shared_text)
+
         recent = ttk.Frame(self.content, style="Surface.TFrame", padding=(14, 10))
         recent.pack(fill="both", expand=True, pady=(12, 0))
         recent.columnconfigure(0, weight=1)
         recent.rowconfigure(1, weight=1)
         recent_header = ttk.Frame(recent, style="Surface.TFrame")
         recent_header.grid(row=0, column=0, sticky="ew", pady=(0, 7))
-        ttk.Label(recent_header, text="最近操作（最新 10 条）", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
+        ttk.Label(recent_header, text="最近操作", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
         ttk.Button(recent_header, text="刷新", width=6, style="Compact.TButton", command=self._load_overview_logs).pack(side="right")
-        ttk.Button(recent_header, text="查看全部", width=7, style="Compact.TButton", command=lambda: self.show_page("logs")).pack(side="right", padx=(0, 6))
         columns = ("time", "actor", "action", "ip", "mac", "result")
         self.overview_log_tree = ttk.Treeview(
             recent,
@@ -409,18 +470,30 @@ class CHFSApplication(tk.Tk):
             displaycolumns=columns,
             show="headings",
             selectmode="browse",
-            height=10,
+            height=8,
         )
         headings = {"time": "时间", "actor": "用户", "action": "操作 / 文件", "ip": "来源 IP", "mac": "设备标识", "result": "结果"}
-        # 以 1120px 窗口为下限安排列宽；更宽时把额外空间交给“操作 / 文件”列。
-        widths = {"time": 125, "actor": 70, "action": 330, "ip": 110, "mac": 125, "result": 60}
+        self.overview_log_headings = headings
+        self.overview_log_sort_reverse: dict[str, bool] = {}
+        self._overview_log_drag_column: str | None = None
+        self._overview_log_drag_start_x = 0
+        self._overview_log_drag_moved = False
+        widths = {"time": 115, "actor": 65, "action": 330, "ip": 105, "mac": 115, "result": 55}
         for name in columns:
             self.overview_log_tree.heading(name, text=headings[name])
-            self.overview_log_tree.column(name, width=widths[name], minwidth=24, stretch=False)
+            self.overview_log_tree.column(
+                name,
+                width=widths[name],
+                minwidth=35,
+                stretch=name == "action",
+            )
         overview_scroll = ttk.Scrollbar(recent, orient="vertical", command=self.overview_log_tree.yview)
         self.overview_log_tree.configure(yscrollcommand=overview_scroll.set)
         self.overview_log_tree.grid(row=1, column=0, sticky="nsew")
         overview_scroll.grid(row=1, column=1, sticky="ns")
+        self.overview_log_tree.bind("<ButtonPress-1>", self._on_overview_log_header_press)
+        self.overview_log_tree.bind("<B1-Motion>", self._on_overview_log_header_drag)
+        self.overview_log_tree.bind("<ButtonRelease-1>", self._on_overview_log_header_release)
         self._load_overview_logs()
 
     def _reflow_overview(self, event: tk.Event[tk.Misc]) -> None:
@@ -488,6 +561,150 @@ class CHFSApplication(tk.Tk):
             ).pack(side="right")
         self._action_bar()
 
+    def _build_overview_shared_text(self, card: ttk.Frame) -> None:
+        summary = ttk.Frame(card, style="Surface.TFrame")
+        summary.pack(fill="x", pady=(0, 8))
+        ttk.Label(summary, text="共享文本", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
+        self.shared_text_status_var = tk.StringVar(value="正在读取…")
+        ttk.Label(summary, textvariable=self.shared_text_status_var, style="Muted.TLabel").pack(side="right")
+
+        editor = ttk.Frame(card, style="Surface.TFrame")
+        editor.pack(fill="both", expand=True)
+        editor.rowconfigure(0, weight=1)
+        editor.columnconfigure(0, weight=1)
+        self.shared_text_widget = tk.Text(
+            editor,
+            wrap="word",
+            undo=True,
+            width=1,
+            height=7,
+            bg=SURFACE_ALT,
+            fg=TEXT,
+            insertbackground=ACCENT,
+            selectbackground=ACCENT_DARK,
+            selectforeground=TEXT,
+            relief="flat",
+            padx=10,
+            pady=9,
+            font=("Microsoft YaHei UI", 10),
+        )
+        scrollbar = ttk.Scrollbar(editor, orient="vertical", command=self.shared_text_widget.yview)
+        self.shared_text_widget.configure(yscrollcommand=scrollbar.set)
+        self.shared_text_widget.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self._shared_text_loading = False
+        self._shared_text_dirty = False
+        self.shared_text_widget.edit_modified(False)
+        self.shared_text_widget.bind("<<Modified>>", self._on_shared_text_changed)
+
+        # 工具条悬浮在文本框右下角，不再额外占用概览页的纵向空间。
+        actions = ttk.Frame(editor, style="Surface.TFrame", padding=4)
+        actions.place(relx=1.0, rely=1.0, anchor="se", x=-14, y=-12)
+        ttk.Button(actions, text="复制", width=6, style="Compact.TButton", command=self._copy_shared_text).pack(side="left")
+        ttk.Button(actions, text="粘贴", width=6, style="Compact.TButton", command=self._paste_shared_text).pack(side="left", padx=(6, 0))
+        ttk.Button(actions, text="清空", width=6, style="Compact.TButton", command=self._clear_shared_text).pack(side="left", padx=(6, 0))
+        ttk.Button(actions, text="刷新", width=6, style="Compact.TButton", command=lambda: self._refresh_shared_text(manual=True)).pack(side="left", padx=(6, 0))
+        actions.lift()
+
+        self._refresh_shared_text()
+        self.after(3000, self._poll_shared_text_page)
+
+    def _on_shared_text_changed(self, _event: tk.Event[tk.Misc]) -> None:
+        widget = self.shared_text_widget
+        if widget is None or not widget.edit_modified():
+            return
+        widget.edit_modified(False)
+        if self._shared_text_loading:
+            return
+        self._shared_text_dirty = True
+        self.shared_text_status_var.set("等待自动保存…")
+        if self._shared_text_save_after_id is not None:
+            self.after_cancel(self._shared_text_save_after_id)
+        self._shared_text_save_after_id = self.after(600, self._save_shared_text)
+
+    def _refresh_shared_text(self, *, manual: bool = False) -> None:
+        widget = getattr(self, "shared_text_widget", None)
+        if widget is None or not widget.winfo_exists():
+            return
+        if self._shared_text_dirty:
+            if not manual:
+                return
+            if not messagebox.askyesno("放弃本地修改？", "刷新会覆盖尚未保存的内容，确定继续吗？"):
+                return
+        snapshot = self.controller.read_shared_text()
+        if snapshot is None:
+            self.shared_text_status_var.set("等待服务启动…")
+            return
+        self._shared_text_loading = True
+        try:
+            widget.delete("1.0", "end")
+            widget.insert("1.0", str(snapshot["text"]))
+            widget.edit_modified(False)
+            self._shared_text_dirty = False
+        finally:
+            self._shared_text_loading = False
+        self._set_shared_text_status(snapshot)
+
+    def _set_shared_text_status(self, snapshot: dict[str, object], prefix: str = "已同步") -> None:
+        updated = snapshot.get("updated_at")
+        if updated:
+            updated_text = self._format_audit_time(str(updated))
+        else:
+            updated_text = "尚未保存"
+        self.shared_text_status_var.set(f"{prefix} · {updated_text} · 版本 {snapshot['revision']}")
+
+    def _save_shared_text(self) -> None:
+        self._shared_text_save_after_id = None
+        widget = getattr(self, "shared_text_widget", None)
+        if widget is None or not widget.winfo_exists() or not self._shared_text_dirty:
+            return
+        try:
+            snapshot = self.controller.update_shared_text(widget.get("1.0", "end-1c"))
+        except (CHFSError, RuntimeError, OSError) as exc:
+            messagebox.showerror("无法保存共享文本", str(exc))
+            return
+        self._shared_text_dirty = False
+        widget.edit_modified(False)
+        self._set_shared_text_status(snapshot, "自动保存")
+
+    def _copy_shared_text(self) -> None:
+        widget = getattr(self, "shared_text_widget", None)
+        if widget is None:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(widget.get("1.0", "end-1c"))
+        self.shared_text_status_var.set("已复制全部文本")
+
+    def _paste_shared_text(self) -> None:
+        widget = getattr(self, "shared_text_widget", None)
+        if widget is None:
+            return
+        try:
+            value = self.clipboard_get()
+        except tk.TclError:
+            messagebox.showinfo("剪贴板为空", "当前剪贴板中没有可粘贴的文本。")
+            return
+        if widget.tag_ranges("sel"):
+            widget.delete("sel.first", "sel.last")
+        widget.insert("insert", value)
+        widget.focus_set()
+
+    def _clear_shared_text(self) -> None:
+        widget = getattr(self, "shared_text_widget", None)
+        if widget is None:
+            return
+        if not messagebox.askyesno("清空共享文本？", "其他设备也会同步清空，确定继续吗？"):
+            return
+        widget.delete("1.0", "end")
+        widget.edit_modified(True)
+        widget.focus_set()
+
+    def _poll_shared_text_page(self) -> None:
+        if self._active_page != "overview":
+            return
+        self._refresh_shared_text()
+        self.after(3000, self._poll_shared_text_page)
+
     def _build_network(self) -> None:
         self._page_header("网络与访问", "控制监听地址、端口以及允许或拒绝的来源网段")
         card = self._surface(self.content, fill="both", expand=True)
@@ -506,9 +723,29 @@ class CHFSApplication(tk.Tk):
         self.deny_text = tk.Text(grid, height=8, bg=SURFACE_ALT, fg=TEXT, insertbackground=TEXT, relief="flat", padx=10, pady=8)
         self.allow_text.grid(row=3, column=0, sticky="nsew", padx=(0, 8), pady=(7, 0))
         self.deny_text.grid(row=3, column=1, sticky="nsew", padx=(8, 0), pady=(7, 0))
-        self.allow_text.insert("1.0", "\n".join(self.config.allow_networks))
-        self.deny_text.insert("1.0", "\n".join(self.config.deny_networks))
+        self.allow_text.insert("1.0", "\n".join(self._allow_network_draft))
+        self.deny_text.insert("1.0", "\n".join(self._deny_network_draft))
+        self._bind_network_text_auto_save(self.allow_text, "_allow_network_draft")
+        self._bind_network_text_auto_save(self.deny_text, "_deny_network_draft")
         self._action_bar()
+
+    def _bind_network_text_auto_save(self, widget: tk.Text, draft_attribute: str) -> None:
+        """同步多行网段输入；页面切换时也不会丢失尚在防抖期的内容。"""
+
+        widget.edit_modified(False)
+
+        def changed(_event: tk.Event[tk.Misc]) -> None:
+            if not widget.edit_modified():
+                return
+            setattr(
+                self,
+                draft_attribute,
+                tuple(line.strip() for line in widget.get("1.0", "end").splitlines() if line.strip()),
+            )
+            widget.edit_modified(False)
+            self._schedule_auto_save()
+
+        widget.bind("<<Modified>>", changed)
 
     def _build_transfers(self) -> None:
         self._page_header("传输会话", "实时查看正在上传、等待续传和正在下载的文件")
@@ -598,6 +835,10 @@ class CHFSApplication(tk.Tk):
             style="Secondary.TButton",
             command=lambda: self._choose_tls_file(self.tls_key_var, "选择 TLS 私钥"),
         ).pack(side="left", padx=(6, 0))
+        session = ttk.Frame(self.content, style="Surface.TFrame", padding=14)
+        session.pack(fill="x", pady=(12, 0))
+        ttk.Label(session, text="登录会话有效期（小时）", style="Surface.TLabel").pack(side="left")
+        ttk.Entry(session, textvariable=self.ttl_hours_var, width=12).pack(side="right")
         self._action_bar()
 
     def _build_logs(self) -> None:
@@ -662,7 +903,7 @@ class CHFSApplication(tk.Tk):
     def _action_bar(self) -> None:
         bar = ttk.Frame(self.content)
         bar.pack(fill="x", pady=(18, 0))
-        ttk.Button(bar, text="保存配置", style="Primary.TButton", command=self._save_config).pack(side="right")
+        ttk.Label(bar, textvariable=self.auto_save_status_var, style="Muted.TLabel").pack(side="right")
 
     def _build_config(self) -> AppConfig:
         permissions = {
@@ -674,11 +915,6 @@ class CHFSApplication(tk.Tk):
             )
             if enabled
         }
-        allow = self.config.allow_networks
-        deny = self.config.deny_networks
-        if hasattr(self, "allow_text") and self._active_page == "network":
-            allow = tuple(line.strip() for line in self.allow_text.get("1.0", "end").splitlines() if line.strip())
-            deny = tuple(line.strip() for line in self.deny_text.get("1.0", "end").splitlines() if line.strip())
         document = {
             "share_root": self.root_var.get().strip(),
             "host": self.host_var.get().strip(),
@@ -689,8 +925,8 @@ class CHFSApplication(tk.Tk):
             "tls_certificate": self.tls_cert_var.get().strip() or None,
             "tls_private_key": self.tls_key_var.get().strip() or None,
             "guest_permissions": sorted(item.value for item in permissions),
-            "allow_networks": list(allow),
-            "deny_networks": list(deny),
+            "allow_networks": list(self._allow_network_draft),
+            "deny_networks": list(self._deny_network_draft),
             "accounts": [
                 {"username": item.username, "password_hash": item.password_hash, "permissions": sorted(permission.value for permission in item.permissions)}
                 for item in self.accounts
@@ -700,11 +936,10 @@ class CHFSApplication(tk.Tk):
         return AppConfig.from_dict(document, base_dir=self.config_path.parent)
 
     def _toggle_full_disk_access(self) -> None:
-        if self.controller.state != "stopped":
-            messagebox.showwarning("请先停止服务", "改变全盘访问范围前必须先停止服务。")
-            return
+        self._auto_save_suspended = True
         if self.full_disk_var.get():
             if not messagebox.askyesno("关闭全盘访问", "恢复为默认 CHFShare 共享目录？"):
+                self._auto_save_suspended = False
                 return
             self.full_disk_var.set(False)
             self.root_var.set(str(default_share_root().resolve()))
@@ -717,33 +952,96 @@ class CHFSApplication(tk.Tk):
                 icon="warning",
             )
             if not confirmed:
+                self._auto_save_suspended = False
                 return
             self.full_disk_var.set(True)
             self.read_var.set(True)
             self.write_var.set(True)
             self.delete_var.set(True)
+        self._auto_save_suspended = False
         current_page = self._active_page
-        if self._save_config(quiet=True):
+        if self._save_config(quiet=True, restart_running=True, automatic=False):
             self.show_page(current_page)
 
-    def _save_config(self, *, quiet: bool = False) -> bool:
-        if self.controller.state != "stopped":
-            messagebox.showwarning("服务正在运行", "请先停止服务，再修改并保存配置。")
-            return False
+    def _save_config(
+        self,
+        *,
+        quiet: bool = False,
+        restart_running: bool = True,
+        automatic: bool = False,
+    ) -> bool:
+        """校验并持久化配置；服务在线时安排一次使用最新配置的平滑重启。"""
+
         try:
-            self.config = self._build_config()
-            self.config.save(self.config_path)
+            updated_config = self._build_config()
+            changed = updated_config != self.config or not self.config_path.exists()
+            if changed:
+                updated_config.save(self.config_path)
         except (ValueError, CHFSError, OSError) as exc:
-            messagebox.showerror("配置无效", str(exc))
+            self.auto_save_status_var.set(f"尚未保存：{exc}")
+            if not automatic:
+                messagebox.showerror("配置无效", str(exc))
             return False
+        self.config = updated_config
+        if changed and restart_running and self.controller.state != "stopped":
+            self._pending_config_restart = True
+            self.auto_save_status_var.set("配置已保存，正在自动应用…")
+            self._request_config_restart()
+        elif self._pending_config_restart:
+            self.auto_save_status_var.set("配置已保存，正在自动应用…")
+        else:
+            self.auto_save_status_var.set("配置已自动保存")
         if not quiet:
             messagebox.showinfo("保存成功", f"配置已保存到：\n{self.config_path}")
         return True
 
+    def _request_config_restart(self) -> None:
+        """只发起一次停止请求；停止期间的新配置会合并到同一次重启。"""
+
+        if not self._pending_config_restart or self._restart_stop_requested:
+            return
+        if self.controller.state not in {"running", "starting"}:
+            return
+        self._restart_stop_requested = True
+
+        def stop_for_restart() -> None:
+            try:
+                self.controller.stop()
+            finally:
+                self._restart_stop_requested = False
+
+        threading.Thread(
+            target=stop_for_restart,
+            name="chfs-config-restart-worker",
+            daemon=True,
+        ).start()
+
+    def _advance_config_restart(self) -> str:
+        """推进自动重启状态机，并返回推进后的服务状态。"""
+
+        state = self.controller.state
+        if not self._pending_config_restart:
+            return state
+        if state == "stopped":
+            # 配置在停止期间仍可能继续变化，因此只在真正重启前读取 self.config。
+            self._pending_config_restart = False
+            self._restart_stop_requested = False
+            if self.controller.start(self.config):
+                self.auto_save_status_var.set("最新配置已应用")
+                return self.controller.state
+            return state
+        self._request_config_restart()
+        return self.controller.state
+
     def _toggle_server(self) -> None:
         if self.controller.state == "stopped":
+            self._pending_config_restart = False
             self._start_server()
         else:
+            # 用户主动停止优先于自动重载；先保存最后一笔编辑，但不再自动启动。
+            self._cancel_scheduled_auto_save()
+            self._pending_config_restart = False
+            self._save_config(quiet=True, restart_running=False, automatic=True)
             self.status_var.set("正在停止")
             self.status_detail_var.set("等待当前请求结束…")
             # 停止过程可能需要等待正在处理的请求，必须放到后台线程，避免 GUI
@@ -755,7 +1053,8 @@ class CHFSApplication(tk.Tk):
 
         if self.controller.state != "stopped":
             return
-        if not self._save_config(quiet=True):
+        self._cancel_scheduled_auto_save()
+        if not self._save_config(quiet=True, restart_running=False, automatic=False):
             return
         if self.controller.start(self.config):
             self.status_var.set("正在启动")
@@ -764,7 +1063,7 @@ class CHFSApplication(tk.Tk):
     def _poll_server_state(self) -> None:
         while not self._state_events.empty():
             self._state_events.get_nowait()
-        state = self.controller.state
+        state = self._advance_config_restart()
         if self.toggle_button is not None and self.toggle_button.winfo_exists():
             if state == "running":
                 self.status_var.set("运行中")
@@ -945,6 +1244,8 @@ class CHFSApplication(tk.Tk):
             messagebox.showerror("密码无效", str(exc))
             return
         self.accounts.append(account)
+        if not self._save_config(quiet=True, restart_running=True, automatic=False):
+            self.accounts.pop()
         self.show_page("accounts")
 
     def _delete_account(self) -> None:
@@ -954,7 +1255,9 @@ class CHFSApplication(tk.Tk):
             return
         index = int(selection[0])
         if messagebox.askyesno("删除账户", f"确定删除账户 {self.accounts[index].username}？"):
-            self.accounts.pop(index)
+            removed = self.accounts.pop(index)
+            if not self._save_config(quiet=True, restart_running=True, automatic=False):
+                self.accounts.insert(index, removed)
             self.show_page("accounts")
 
     def _load_logs(self) -> None:
@@ -1040,25 +1343,103 @@ class CHFSApplication(tk.Tk):
             self._sort_log_column(column)
         return "break"
 
+    def _sort_overview_log_column(self, column: str) -> None:
+        """按当前列排序概览记录，并显示与审计日志一致的升降序箭头。"""
+
+        reverse = self.overview_log_sort_reverse.get(column, False)
+        rows = [(self.overview_log_tree.set(item, column), item) for item in self.overview_log_tree.get_children()]
+        rows.sort(key=lambda row: row[0].casefold(), reverse=reverse)
+        for index, (_value, item) in enumerate(rows):
+            self.overview_log_tree.move(item, "", index)
+        for name, title in self.overview_log_headings.items():
+            self.overview_log_tree.heading(name, text=title)
+        self.overview_log_tree.heading(
+            column,
+            text=f"{self.overview_log_headings[column]} {'▼' if reverse else '▲'}",
+        )
+        self.overview_log_sort_reverse[column] = not reverse
+
+    def _overview_log_display_columns(self) -> list[str]:
+        """返回概览记录当前可见列顺序。"""
+
+        displayed = tuple(self.overview_log_tree["displaycolumns"])
+        return list(self.overview_log_tree["columns"]) if displayed == ("#all",) else list(displayed)
+
+    def _on_overview_log_header_press(self, event: tk.Event[tk.Misc]) -> str | None:
+        """记录概览表头按下位置；列分隔线继续使用原生宽度调整。"""
+
+        self._overview_log_drag_column = None
+        self._overview_log_drag_moved = False
+        if self.overview_log_tree.identify_region(event.x, event.y) != "heading":
+            return None
+        try:
+            index = int(self.overview_log_tree.identify_column(event.x).removeprefix("#")) - 1
+            self._overview_log_drag_column = self._overview_log_display_columns()[index]
+            self._overview_log_drag_start_x = event.x
+        except (ValueError, IndexError):
+            self._overview_log_drag_column = None
+            return None
+        return "break"
+
+    def _on_overview_log_header_drag(self, event: tk.Event[tk.Misc]) -> str | None:
+        """拖动概览表头时调整列顺序，行为与审计日志一致。"""
+
+        if self._overview_log_drag_column is None or abs(event.x - self._overview_log_drag_start_x) < 6:
+            return None
+        if self.overview_log_tree.identify_region(event.x, event.y) != "heading":
+            return None
+        try:
+            target_index = int(self.overview_log_tree.identify_column(event.x).removeprefix("#")) - 1
+            columns = self._overview_log_display_columns()
+            source_index = columns.index(self._overview_log_drag_column)
+            if target_index == source_index:
+                return "break"
+            column = columns.pop(source_index)
+            columns.insert(target_index, column)
+        except (ValueError, IndexError):
+            return None
+        self.overview_log_tree["displaycolumns"] = tuple(columns)
+        self._overview_log_drag_moved = True
+        return "break"
+
+    def _on_overview_log_header_release(self, event: tk.Event[tk.Misc]) -> str | None:
+        """短按概览表头排序；完成拖动时不触发排序。"""
+
+        column = self._overview_log_drag_column
+        dragged = self._overview_log_drag_moved
+        self._overview_log_drag_column = None
+        self._overview_log_drag_moved = False
+        if column is None:
+            return None
+        if not dragged and self.overview_log_tree.identify_region(event.x, event.y) == "heading":
+            self._sort_overview_log_column(column)
+        return "break"
+
     def _load_overview_logs(self) -> None:
-        """在概览页使用单行表格显示最新十条操作记录。"""
+        """在概览页加载全部操作记录，由表格滚动条控制可见范围。"""
 
         tree = getattr(self, "overview_log_tree", None)
         if tree is None or not tree.winfo_exists():
             return
         for item in tree.get_children():
             tree.delete(item)
-        for event in self._read_audit_events(limit=10):
+        events = self._read_audit_events(limit=None)
+        if not events:
+            tree.insert("", "end", values=("暂无记录", "-", "启动服务并执行文件操作后会显示在这里", "-", "-", "-"))
+            return
+        for event in events:
             tree.insert("", "end", values=self._audit_row_values(event))
 
-    def _read_audit_events(self, *, limit: int) -> list[dict[str, object]]:
+    def _read_audit_events(self, *, limit: int | None) -> list[dict[str, object]]:
         """读取最近的结构化审计事件；损坏行不会影响其余日志展示。"""
 
         path = self.config.audit_log
         if not path or not path.exists():
             return []
         events: list[dict[str, object]] = []
-        for line in reversed(path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]):
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        selected_lines = lines[-limit:] if limit is not None else lines
+        for line in reversed(selected_lines):
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
@@ -1078,6 +1459,7 @@ class CHFSApplication(tk.Tk):
             "file.download": "下载文件",
             "file.delete": "删除文件",
             "directory.create": "新建文件夹",
+            "shared_text.update": "更新共享文本",
             "network.reject": "拒绝网络访问",
         }
         raw_action = str(event.get("action", "-") or "-")
@@ -1158,6 +1540,10 @@ class CHFSApplication(tk.Tk):
             return fallback
 
     def _on_close(self) -> None:
+        self._closing = True
+        self._cancel_scheduled_auto_save()
+        self._save_config(quiet=True, restart_running=False, automatic=True)
+        self._pending_config_restart = False
         if self.controller.state != "stopped":
             self.controller.stop()
         self.destroy()

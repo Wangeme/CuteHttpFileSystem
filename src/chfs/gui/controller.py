@@ -12,9 +12,11 @@ import uvicorn
 
 from ..config import AppConfig
 from ..http import create_app
+from ..models import Permission, Principal
 
 
 LOGGER = logging.getLogger(__name__)
+DESKTOP_PRINCIPAL = Principal("desktop", frozenset({Permission.ADMIN}), authenticated=True)
 
 
 class ServerController:
@@ -126,6 +128,34 @@ class ServerController:
         runtime = application.state.runtime
         result = runtime.uploads.snapshots() + runtime.transfers.snapshots()
         return sorted(result, key=lambda item: float(item["updated_at"]), reverse=True)
+
+    def read_shared_text(self) -> dict[str, object] | None:
+        """读取与网页端共用的持久化文本；服务尚未装配时返回 None。"""
+
+        with self._lock:
+            application = self._application
+        if application is None:
+            return None
+        return application.state.runtime.shared_text.read(DESKTOP_PRINCIPAL)
+
+    def update_shared_text(self, text: str) -> dict[str, object]:
+        """以桌面管理员身份更新共享文本，并记录本机审计事件。"""
+
+        with self._lock:
+            application = self._application
+        if application is None:
+            raise RuntimeError("服务尚未启动，无法同步共享文本")
+        runtime = application.state.runtime
+        result = runtime.shared_text.update(DESKTOP_PRINCIPAL, text)
+        runtime.audit.record(
+            "shared_text.update",
+            actor=DESKTOP_PRINCIPAL.name,
+            source="127.0.0.1",
+            success=True,
+            revision=result["revision"],
+            size=len(text.encode("utf-8")),
+        )
+        return result
 
     def wait_until_started(self, timeout: float = 5.0) -> bool:
         """供测试和 GUI 状态轮询使用，不阻塞无限时间。"""

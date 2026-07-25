@@ -52,7 +52,8 @@ def main() -> int:
 
     total_size = args.size_mib * 1024 * 1024
     # 固定块避免为基准额外占用与文件同等大小的进程内存。
-    pattern = bytes((index * 31 + 17) & 0xFF for index in range(DEFAULT_CHUNK_SIZE))
+    seed = bytes((index * 31 + 17) & 0xFF for index in range(256))
+    pattern = (seed * ((DEFAULT_CHUNK_SIZE + len(seed) - 1) // len(seed)))[:DEFAULT_CHUNK_SIZE]
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]

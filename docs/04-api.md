@@ -40,7 +40,7 @@
 按精确偏移直接发送分块，不在浏览器逐块计算 SHA-256：
 
 ```http
-PATCH /api/v1/uploads/{upload_id}?offset=16777216
+PATCH /api/v1/uploads/{upload_id}?offset=134217728
 Content-Type: application/octet-stream
 ```
 
@@ -49,3 +49,16 @@ Content-Type: application/octet-stream
 SHA-256、执行 `fsync` 并原子发布。偏移不一致返回 HTTP 409。
 
 `GET /api/v1/content` 支持 `Range: bytes=start-end`，成功的部分响应为 HTTP 206。
+
+## 共享文本
+
+```http
+GET /api/v1/shared-text
+PUT /api/v1/shared-text
+Content-Type: application/json
+
+{"text":"手机和电脑之间同步的文本"}
+```
+
+读取需要 `read` 权限，更新需要 `write` 权限。服务端限制 UTF-8 文本不超过 1 MiB，
+并返回 `revision`、`updated_at` 和 `max_bytes`；网页在本地没有未保存编辑时每 3 秒自动刷新。

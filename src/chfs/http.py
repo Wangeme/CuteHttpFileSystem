@@ -22,6 +22,7 @@ from .models import Principal
 from .paths import FullDiskPathResolver, SafePathResolver
 from .security import NetworkPolicy, SessionManager
 from .services import FileService
+from .shared_text import SharedTextStore
 from .transfers import TransferRegistry
 from .uploads import ResumableUploadManager
 
@@ -38,6 +39,7 @@ class Runtime:
     audit: AuditLogger
     uploads: ResumableUploadManager
     transfers: TransferRegistry
+    shared_text: SharedTextStore
 
 
 class TrackedFileResponse(FileResponse):
@@ -125,6 +127,9 @@ def create_app(config: AppConfig) -> Starlette:
     """装配应用依赖；测试和 GUI 都可据此创建独立服务实例。"""
 
     resolver = FullDiskPathResolver() if config.full_disk_access else SafePathResolver(config.share_root)
+    shared_text_path = (
+        config.share_root.parent / f".{config.share_root.name}.chfs-state" / "shared-text.json"
+    )
     runtime = Runtime(
         config=config,
         files=FileService(resolver, config.max_upload_bytes),
@@ -133,6 +138,7 @@ def create_app(config: AppConfig) -> Starlette:
         audit=AuditLogger(config.audit_log),
         uploads=ResumableUploadManager(resolver, config.max_upload_bytes),
         transfers=TransferRegistry(),
+        shared_text=SharedTextStore(shared_text_path),
     )
     routes = [
         Route("/", web_index, methods=["GET"]),
@@ -142,6 +148,7 @@ def create_app(config: AppConfig) -> Starlette:
         Route("/api/v1/files", list_or_delete_files, methods=["GET", "DELETE"]),
         Route("/api/v1/content", content, methods=["GET", "PUT"]),
         Route("/api/v1/directories", create_directory, methods=["POST"]),
+        Route("/api/v1/shared-text", shared_text, methods=["GET", "PUT"]),
         Route("/api/v1/uploads", create_resumable_upload, methods=["POST"]),
         Route("/api/v1/uploads/{upload_id}", upload_chunk, methods=["PATCH", "DELETE"]),
         Route("/api/v1/uploads/{upload_id}/complete", complete_resumable_upload, methods=["POST"]),
@@ -287,6 +294,29 @@ async def create_directory(request: Request) -> JSONResponse:
     entry = runtime.files.create_directory(principal, user_path)
     runtime.audit.record("directory.create", actor=principal.name, source=_source(request), success=True, path=user_path)
     return JSONResponse(entry.as_dict(), status_code=201)
+
+
+async def shared_text(request: Request) -> JSONResponse:
+    """读取或更新供同一服务器各设备使用的共享文本。"""
+
+    runtime = _runtime(request)
+    principal = _principal(request)
+    if request.method == "GET":
+        return JSONResponse(runtime.shared_text.read(principal))
+    payload = await _json_object(request)
+    text = payload.get("text")
+    if not isinstance(text, str):
+        raise InvalidPathError("text 必须是字符串")
+    result = runtime.shared_text.update(principal, text)
+    runtime.audit.record(
+        "shared_text.update",
+        actor=principal.name,
+        source=_source(request),
+        success=True,
+        revision=result["revision"],
+        size=len(text.encode("utf-8")),
+    )
+    return JSONResponse(result)
 
 
 async def create_resumable_upload(request: Request) -> JSONResponse:
