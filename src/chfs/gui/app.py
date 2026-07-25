@@ -389,13 +389,20 @@ class CHFSApplication(tk.Tk):
         self.qr_label.pack(anchor="center")
 
         for index, url in enumerate(urls):
-            row = ttk.Frame(address_list, style="AddressRow.TFrame", padding=(10, 7))
+            row = ttk.Frame(address_list, style="AddressRow.TFrame", padding=(10, 8))
             row.pack(fill="x", pady=(0, 6) if index < len(urls) - 1 else 0)
-            ttk.Label(
+            tk.Label(
                 row,
                 text="局域网地址" if index == 0 and "127.0.0.1" not in url else "本机地址",
-                style="AddressRow.TLabel",
-                width=7,
+                bg=SURFACE_ALT,
+                fg=MUTED,
+                font=("Microsoft YaHei UI", 9),
+                width=8,
+                anchor="w",
+                justify="left",
+                padx=0,
+                pady=1,
+                bd=0,
             ).pack(side="left")
             url_label = tk.Label(
                 row,
