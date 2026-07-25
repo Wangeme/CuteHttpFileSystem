@@ -1184,8 +1184,14 @@ class CHFSApplication(tk.Tk):
 
         for x in range(width):
             y = pattern_y[x % period]
-            image.put("#0c7c2b", to=(x, max(0, y - 1), x + 1, min(height, y + 2)))
-            image.put(RUNNING, to=(x, y, x + 1, y + 1))
+            next_y = pattern_y[(x + 1) % period]
+            top = min(y, next_y)
+            bottom = max(y, next_y)
+            image.put(
+                "#0c7c2b",
+                to=(x, max(0, top - 1), x + 1, min(height, bottom + 2)),
+            )
+            image.put(RUNNING, to=(x, top, x + 1, bottom + 1))
         return image
 
     def _animate_status_waveform(self) -> None:
