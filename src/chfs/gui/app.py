@@ -235,6 +235,8 @@ class CHFSApplication(tk.Tk):
         style.map("Secondary.TButton", background=[("active", BORDER)])
         style.configure("Compact.TButton", background=SURFACE_ALT, foreground=TEXT, padding=(7, 6), borderwidth=1)
         style.map("Compact.TButton", background=[("active", BORDER)])
+        style.configure("CompactDanger.TButton", background="#4a2230", foreground="#fecdd3", padding=(7, 6), borderwidth=0)
+        style.map("CompactDanger.TButton", background=[("active", "#6b293b")])
         style.configure("Danger.TButton", background="#4a2230", foreground="#fecdd3", padding=(14, 9), borderwidth=0)
         style.map("Danger.TButton", background=[("active", "#6b293b")])
         style.configure("TEntry", padding=9, insertcolor=TEXT)
@@ -379,21 +381,11 @@ class CHFSApplication(tk.Tk):
         body.columnconfigure(1, minsize=128)
         qr_panel = tk.Frame(
             body,
-            bg=SURFACE_ALT,
-            highlightbackground=BORDER,
-            highlightthickness=1,
+            bg=SURFACE,
+            highlightthickness=0,
             bd=0,
-            padx=8,
-            pady=8,
         )
         qr_panel.grid(row=0, column=1, sticky="n")
-        tk.Label(
-            qr_panel,
-            text="扫码访问",
-            bg=SURFACE_ALT,
-            fg=MUTED,
-            font=("Microsoft YaHei UI", 8),
-        ).pack(anchor="center", pady=(0, 7))
         self.qr_label = tk.Label(qr_panel, bg="#ffffff", bd=0)
         self.qr_label.pack(anchor="center")
 
@@ -438,6 +430,13 @@ class CHFSApplication(tk.Tk):
             style="Compact.TButton",
             command=self._open_share_location,
         ).pack(side="right")
+        ttk.Button(
+            service_header,
+            text="关闭全盘访问" if self.full_disk_var.get() else "开放全盘访问",
+            width=10,
+            style="Compact.TButton" if self.full_disk_var.get() else "CompactDanger.TButton",
+            command=self._toggle_full_disk_access,
+        ).pack(side="right", padx=(0, 8))
         root_name = "本机所有可用磁盘" if self.full_disk_var.get() else (Path(self.root_var.get()).name or self.root_var.get())
         service_rows = (
             ("服务名称", "CHFS 文件传输服务"),
@@ -448,7 +447,7 @@ class CHFSApplication(tk.Tk):
         )
         for index, (label, value) in enumerate(service_rows):
             row = ttk.Frame(service, style="FlatSurface.TFrame")
-            row.pack(fill="x", pady=3)
+            row.pack(fill="x", pady=1)
             ttk.Label(row, text=label, style="CardTitle.TLabel", width=10).pack(side="left")
             ttk.Label(
                 row,
@@ -458,13 +457,6 @@ class CHFSApplication(tk.Tk):
             ).pack(side="left", fill="x", expand=True)
             if index < len(service_rows) - 1:
                 ttk.Separator(service, orient="horizontal").pack(fill="x")
-        disk_button = ttk.Button(
-            service,
-            text="关闭全盘访问" if self.full_disk_var.get() else "开放全盘访问",
-            style="Secondary.TButton" if self.full_disk_var.get() else "Danger.TButton",
-            command=self._toggle_full_disk_access,
-        )
-        disk_button.pack(anchor="e", pady=(8, 0))
 
         upper.bind("<Configure>", self._reflow_overview)
 
