@@ -75,13 +75,12 @@ class CHFSApplication(tk.Tk):
 
         self.title("CHFS · HTTP 文件传输服务器")
         self._window_icon = tk.PhotoImage(file=Path(__file__).with_name("chfs-icon.png"))
-        self._status_waveform = tk.PhotoImage(file=Path(__file__).with_name("status-waveform.png"))
+        self._status_waveform = self._create_continuous_waveform_texture()
         self._animated_waveform = tk.PhotoImage(
             width=self._status_waveform.width(),
             height=self._status_waveform.height(),
         )
         self._waveform_offset = 0
-        self._waveform_tick = 0
         self._render_waveform_frame()
         self.iconphoto(True, self._window_icon)
         if os.name == "nt":
@@ -98,7 +97,7 @@ class CHFSApplication(tk.Tk):
         self._build_shell()
         self.show_page("overview")
         self.after(150, self._poll_server_state)
-        self.after(90, self._animate_status_waveform)
+        self.after(50, self._animate_status_waveform)
         if auto_start:
             # 等主窗口完成绘制后再启动，确保失败信息能够正常显示。
             self.after(250, self._start_server)
@@ -1144,17 +1143,58 @@ class CHFSApplication(tk.Tk):
         target.tk.call(str(target), "copy", str(source), "-from", offset, 0, width, height, "-to", 0, 0)
         target.tk.call(str(target), "copy", str(source), "-from", 0, 0, offset, height, "-to", width - offset, 0)
 
+    def _create_continuous_waveform_texture(self) -> tk.PhotoImage:
+        """生成首尾无缝衔接的心电纹理，避免循环滚动时出现空段或断线。"""
+
+        width = 512
+        height = 72
+        period = 128
+        middle = height // 2
+        image = tk.PhotoImage(width=width, height=height)
+        image.put("#001408", to=(0, 0, width, height))
+
+        # 轻微像素网格延续现有终端仪表风格。
+        for x in range(0, width, 4):
+            image.put("#03220f" if x % 16 else "#06351a", to=(x, 0, x + 1, height))
+        for y in range(0, height, 4):
+            image.put("#03220f" if y % 16 else "#06351a", to=(0, y, width, y + 1))
+
+        keypoints = (
+            (0, middle),
+            (44, middle),
+            (48, middle - 2),
+            (52, middle),
+            (58, middle),
+            (61, middle + 4),
+            (65, middle - 26),
+            (70, middle + 28),
+            (76, middle - 9),
+            (83, middle),
+            (89, middle - 3),
+            (95, middle + 3),
+            (101, middle),
+            (period, middle),
+        )
+        pattern_y = [middle] * period
+        for (start_x, start_y), (end_x, end_y) in zip(keypoints, keypoints[1:]):
+            span = end_x - start_x
+            for x in range(start_x, min(end_x, period)):
+                ratio = (x - start_x) / span
+                pattern_y[x] = round(start_y + ((end_y - start_y) * ratio))
+
+        for x in range(width):
+            y = pattern_y[x % period]
+            image.put("#0c7c2b", to=(x, max(0, y - 1), x + 1, min(height, y + 2)))
+            image.put(RUNNING, to=(x, y, x + 1, y + 1))
+        return image
+
     def _animate_status_waveform(self) -> None:
-        """运行时让状态波形以不完全匀速的节奏向前跳动。"""
+        """运行时匀速滚动首尾相接的状态波形。"""
 
         if self.controller.state == "running":
-            steps = (3, 4, 3, 6, 2, 5, 3, 4)
-            self._waveform_offset = (
-                self._waveform_offset + steps[self._waveform_tick % len(steps)]
-            ) % self._status_waveform.width()
-            self._waveform_tick += 1
+            self._waveform_offset = (self._waveform_offset + 2) % self._status_waveform.width()
             self._render_waveform_frame()
-        self.after(90, self._animate_status_waveform)
+        self.after(50, self._animate_status_waveform)
 
     def _refresh_transfers(self) -> None:
         tree = getattr(self, "transfer_tree", None)
