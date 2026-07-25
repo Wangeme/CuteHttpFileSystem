@@ -46,6 +46,7 @@ class UploadSession:
     started_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     receiving: bool = False
+    receiving_bytes: int = 0
     full_hasher: Any = field(default_factory=hashlib.sha256, repr=False)
     manifest_hasher: Any = field(default_factory=hashlib.sha256, repr=False)
     append_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -245,12 +246,19 @@ class ResumableUploadManager:
                             raise UploadTooLargeError("单个上传分块超过 128 MiB")
                         if offset + next_received > session.expected_size:
                             raise UploadTooLargeError("收到的数据超过声明的文件大小")
-                        received += await _write_and_hash_without_orphaning(
+                        written = await _write_and_hash_without_orphaning(
                             stream,
                             chunk,
                             session.full_hasher,
                             chunk_hasher,
                         )
+                        received += written
+                        # offset 是协议确认点，只有完整 PATCH 成功后才能推进；另用
+                        # receiving_bytes 暴露请求内的实时进度，避免 128 MiB 分块
+                        # 完成前桌面速率长期为 0、完成瞬间又跳到极高值。
+                        with self._lock:
+                            session.receiving_bytes = received
+                            session.updated_at = time.time()
 
                 if received == 0 and session.expected_size != 0:
                     raise ResourceConflictError("上传分块不能为空")
@@ -268,6 +276,7 @@ class ResumableUploadManager:
                     if actual_digest is not None:
                         session.manifest_hasher.update(actual_digest)
                     session.offset += received
+                    session.receiving_bytes = 0
                     session.updated_at = time.time()
                 return session
             except BaseException:
@@ -279,6 +288,7 @@ class ResumableUploadManager:
             finally:
                 with self._lock:
                     session.receiving = False
+                    session.receiving_bytes = 0
 
     def complete(
         self,
@@ -373,7 +383,10 @@ class ResumableUploadManager:
                     "path": session.public_path,
                     "owner": session.owner,
                     "source": session.source,
-                    "transferred_bytes": session.offset,
+                    "transferred_bytes": min(
+                        session.expected_size,
+                        session.offset + session.receiving_bytes,
+                    ),
                     "total_bytes": session.expected_size,
                     "bytes_per_second": session.offset / elapsed,
                     "status": "uploading" if session.receiving else "waiting",

@@ -119,6 +119,9 @@ class ResumableUploadManagerTests(unittest.IsolatedAsyncioTestCase):
         async def network_chunks():
             yield first
             self.assertEqual(session.temporary.read_bytes(), first)
+            snapshot = self.manager.snapshots()[0]
+            self.assertEqual(snapshot["transferred_bytes"], len(first))
+            self.assertEqual(snapshot["status"], "uploading")
             yield second
 
         await self.manager.append(
