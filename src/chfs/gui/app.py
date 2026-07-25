@@ -207,11 +207,14 @@ class CHFSApplication(tk.Tk):
         style.configure("Sidebar.TFrame", background=SIDEBAR)
         style.configure("Surface.TFrame", background=SURFACE, relief="solid", borderwidth=1)
         style.configure("FlatSurface.TFrame", background=SURFACE, relief="flat", borderwidth=0)
+        style.configure("FlatRunning.TFrame", background=RUNNING_DARK, relief="flat", borderwidth=0)
         style.configure("AddressRow.TFrame", background=SURFACE_ALT, relief="solid", borderwidth=1)
+        style.configure("Overlay.TFrame", background=SURFACE_ALT, relief="flat", borderwidth=0)
         style.configure("Running.TFrame", background=RUNNING_DARK, relief="solid", borderwidth=1)
         style.configure("TLabel", background=BG, foreground=TEXT)
         style.configure("Muted.TLabel", foreground=MUTED)
         style.configure("Surface.TLabel", background=SURFACE, foreground=TEXT)
+        style.configure("SurfaceMuted.TLabel", background=SURFACE, foreground=MUTED)
         style.configure("CardTitle.TLabel", background=SURFACE, foreground=MUTED, font=("Microsoft YaHei UI", 8))
         style.configure("AddressRow.TLabel", background=SURFACE_ALT, foreground=MUTED, font=("Microsoft YaHei UI", 8))
         style.configure("Metric.TLabel", background=SURFACE, foreground=TEXT, font=("Microsoft YaHei UI", 18, "bold"))
@@ -319,7 +322,7 @@ class CHFSApplication(tk.Tk):
         hero.pack(fill="x")
         hero.columnconfigure(1, weight=1)
         self.status_panel = hero
-        status = ttk.Frame(hero, style=hero_style)
+        status = ttk.Frame(hero, style="FlatRunning.TFrame" if running else "FlatSurface.TFrame")
         status.grid(row=0, column=0, sticky="w")
         self.status_text_panel = status
         self.status_value_label = ttk.Label(
@@ -357,11 +360,11 @@ class CHFSApplication(tk.Tk):
         upper.columnconfigure(1, weight=1)
         self._overview_upper = upper
 
-        addresses = ttk.Frame(upper, style="Surface.TFrame", padding=16)
+        addresses = ttk.Frame(upper, style="Surface.TFrame", padding=(16, 14))
         self._overview_addresses = addresses
         addresses.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         ttk.Label(addresses, text="访问地址", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
-        ttk.Label(addresses, text="左键打开 · 右键复制 · 悬停切换二维码", style="CardTitle.TLabel").pack(anchor="w", pady=(3, 10))
+        ttk.Label(addresses, text="左键打开 · 右键复制 · 悬停切换二维码", style="CardTitle.TLabel").pack(anchor="w", pady=(3, 12))
         urls = discover_urls(
             self.host_var.get(),
             self._safe_int(self.port_var.get(), 8080),
@@ -422,11 +425,11 @@ class CHFSApplication(tk.Tk):
             preferred = next((item for item in urls if "192.168." in item or "10." in item or "172." in item), urls[0])
             self._show_qr(preferred)
 
-        service = ttk.Frame(upper, style="Surface.TFrame", padding=16)
+        service = ttk.Frame(upper, style="Surface.TFrame", padding=(16, 14))
         self._overview_service = service
         service.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        service_header = ttk.Frame(service, style="Surface.TFrame")
-        service_header.pack(fill="x", pady=(0, 7))
+        service_header = ttk.Frame(service, style="FlatSurface.TFrame")
+        service_header.pack(fill="x", pady=(0, 10))
         ttk.Label(service_header, text="服务概览", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
         ttk.Button(
             service_header,
@@ -444,7 +447,7 @@ class CHFSApplication(tk.Tk):
             ("账户", f"{len(self.accounts)} 个"),
         )
         for index, (label, value) in enumerate(service_rows):
-            row = ttk.Frame(service, style="Surface.TFrame")
+            row = ttk.Frame(service, style="FlatSurface.TFrame")
             row.pack(fill="x", pady=3)
             ttk.Label(row, text=label, style="CardTitle.TLabel", width=10).pack(side="left")
             ttk.Label(
@@ -465,18 +468,18 @@ class CHFSApplication(tk.Tk):
 
         upper.bind("<Configure>", self._reflow_overview)
 
-        shared_text = ttk.Frame(self.content, style="Surface.TFrame", padding=(14, 10), height=170)
+        shared_text = ttk.Frame(self.content, style="Surface.TFrame", padding=(16, 12), height=170)
         shared_text.pack(fill="x", pady=(12, 0))
         shared_text.pack_propagate(False)
         self._overview_shared_text = shared_text
         self._build_overview_shared_text(shared_text)
 
-        recent = ttk.Frame(self.content, style="Surface.TFrame", padding=(14, 10))
+        recent = ttk.Frame(self.content, style="Surface.TFrame", padding=(16, 12))
         recent.pack(fill="both", expand=True, pady=(12, 0))
         recent.columnconfigure(0, weight=1)
         recent.rowconfigure(1, weight=1)
-        recent_header = ttk.Frame(recent, style="Surface.TFrame")
-        recent_header.grid(row=0, column=0, sticky="ew", pady=(0, 7))
+        recent_header = ttk.Frame(recent, style="FlatSurface.TFrame")
+        recent_header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         ttk.Label(recent_header, text="最近操作", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
         ttk.Button(recent_header, text="刷新", width=6, style="Compact.TButton", command=self._load_overview_logs).pack(side="right")
         columns = ("time", "actor", "action", "ip", "mac", "result")
@@ -578,13 +581,13 @@ class CHFSApplication(tk.Tk):
         self._action_bar()
 
     def _build_overview_shared_text(self, card: ttk.Frame) -> None:
-        summary = ttk.Frame(card, style="Surface.TFrame")
-        summary.pack(fill="x", pady=(0, 8))
+        summary = ttk.Frame(card, style="FlatSurface.TFrame")
+        summary.pack(fill="x", pady=(0, 10))
         ttk.Label(summary, text="共享文本", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
         self.shared_text_status_var = tk.StringVar(value="正在读取…")
-        ttk.Label(summary, textvariable=self.shared_text_status_var, style="Muted.TLabel").pack(side="right")
+        ttk.Label(summary, textvariable=self.shared_text_status_var, style="SurfaceMuted.TLabel").pack(side="right")
 
-        editor = ttk.Frame(card, style="Surface.TFrame")
+        editor = ttk.Frame(card, style="FlatSurface.TFrame")
         editor.pack(fill="both", expand=True)
         editor.rowconfigure(0, weight=1)
         editor.columnconfigure(0, weight=1)
@@ -614,8 +617,8 @@ class CHFSApplication(tk.Tk):
         self.shared_text_widget.bind("<<Modified>>", self._on_shared_text_changed)
 
         # 工具条悬浮在文本框右下角，不再额外占用概览页的纵向空间。
-        actions = ttk.Frame(editor, style="Surface.TFrame", padding=4)
-        actions.place(relx=1.0, rely=1.0, anchor="se", x=-14, y=-12)
+        actions = ttk.Frame(editor, style="Overlay.TFrame", padding=3)
+        actions.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
         ttk.Button(actions, text="复制", width=6, style="Compact.TButton", command=self._copy_shared_text).pack(side="left")
         ttk.Button(actions, text="粘贴", width=6, style="Compact.TButton", command=self._paste_shared_text).pack(side="left", padx=(6, 0))
         ttk.Button(actions, text="清空", width=6, style="Compact.TButton", command=self._clear_shared_text).pack(side="left", padx=(6, 0))
@@ -1125,7 +1128,7 @@ class CHFSApplication(tk.Tk):
         if panel is None or not panel.winfo_exists():
             return
         panel.configure(style="Running.TFrame" if running else "Surface.TFrame")
-        text_panel.configure(style="Running.TFrame" if running else "Surface.TFrame")
+        text_panel.configure(style="FlatRunning.TFrame" if running else "FlatSurface.TFrame")
         value_label.configure(style="RunningMetric.TLabel" if running else "Metric.TLabel")
         detail_label.configure(style="RunningDetail.TLabel" if running else "Surface.TLabel")
         waveform.configure(bg=RUNNING_DARK if running else SURFACE)
