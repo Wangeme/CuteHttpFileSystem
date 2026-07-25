@@ -206,11 +206,14 @@ class CHFSApplication(tk.Tk):
         style.configure("TFrame", background=BG)
         style.configure("Sidebar.TFrame", background=SIDEBAR)
         style.configure("Surface.TFrame", background=SURFACE, relief="solid", borderwidth=1)
+        style.configure("FlatSurface.TFrame", background=SURFACE, relief="flat", borderwidth=0)
+        style.configure("AddressRow.TFrame", background=SURFACE_ALT, relief="solid", borderwidth=1)
         style.configure("Running.TFrame", background=RUNNING_DARK, relief="solid", borderwidth=1)
         style.configure("TLabel", background=BG, foreground=TEXT)
         style.configure("Muted.TLabel", foreground=MUTED)
         style.configure("Surface.TLabel", background=SURFACE, foreground=TEXT)
         style.configure("CardTitle.TLabel", background=SURFACE, foreground=MUTED, font=("Microsoft YaHei UI", 8))
+        style.configure("AddressRow.TLabel", background=SURFACE_ALT, foreground=MUTED, font=("Microsoft YaHei UI", 8))
         style.configure("Metric.TLabel", background=SURFACE, foreground=TEXT, font=("Microsoft YaHei UI", 18, "bold"))
         style.configure("RunningMetric.TLabel", background=RUNNING_DARK, foreground=RUNNING, font=("Microsoft YaHei UI", 20, "bold"))
         style.configure("RunningDetail.TLabel", background=RUNNING_DARK, foreground="#9afcaf", font=("Microsoft YaHei UI", 8))
@@ -364,31 +367,46 @@ class CHFSApplication(tk.Tk):
             self._safe_int(self.port_var.get(), 8080),
             https=bool(self.tls_cert_var.get() and self.tls_key_var.get()),
         )
-        body = ttk.Frame(addresses, style="Surface.TFrame")
-        body.pack(fill="x", expand=True)
+        body = ttk.Frame(addresses, style="FlatSurface.TFrame")
+        body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
-        address_list = ttk.Frame(body, style="Surface.TFrame")
+        body.rowconfigure(0, weight=1)
+        address_list = ttk.Frame(body, style="FlatSurface.TFrame")
         address_list.grid(row=0, column=0, sticky="ew", padx=(0, 14))
-        body.columnconfigure(1, minsize=116)
-        qr_panel = ttk.Frame(body, style="Surface.TFrame", width=116)
-        qr_panel.grid(row=0, column=1, sticky="ne")
-        ttk.Label(qr_panel, text="扫码访问", style="CardTitle.TLabel").pack(anchor="center", pady=(0, 7))
+        body.columnconfigure(1, minsize=128)
+        qr_panel = tk.Frame(
+            body,
+            bg=SURFACE_ALT,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+            bd=0,
+            padx=8,
+            pady=8,
+        )
+        qr_panel.grid(row=0, column=1, sticky="n")
+        tk.Label(
+            qr_panel,
+            text="扫码访问",
+            bg=SURFACE_ALT,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8),
+        ).pack(anchor="center", pady=(0, 7))
         self.qr_label = tk.Label(qr_panel, bg="#ffffff", bd=0)
         self.qr_label.pack(anchor="center")
 
         for index, url in enumerate(urls):
-            row = ttk.Frame(address_list, style="Surface.TFrame", padding=(10, 7))
-            row.pack(fill="x")
+            row = ttk.Frame(address_list, style="AddressRow.TFrame", padding=(10, 7))
+            row.pack(fill="x", pady=(0, 6) if index < len(urls) - 1 else 0)
             ttk.Label(
                 row,
                 text="局域网地址" if index == 0 and "127.0.0.1" not in url else "本机地址",
-                style="CardTitle.TLabel",
+                style="AddressRow.TLabel",
                 width=7,
             ).pack(side="left")
             url_label = tk.Label(
                 row,
                 text=url,
-                bg=SURFACE,
+                bg=SURFACE_ALT,
                 fg=ACCENT,
                 cursor="hand2",
                 font=("Cascadia Mono", 9, "underline"),
@@ -400,8 +418,6 @@ class CHFSApplication(tk.Tk):
             url_label.bind("<Button-3>", lambda _event, value=url: self._copy(value))
             row.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
             url_label.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
-            if index < len(urls) - 1:
-                ttk.Separator(address_list, orient="horizontal").pack(fill="x")
         if urls:
             preferred = next((item for item in urls if "192.168." in item or "10." in item or "172." in item), urls[0])
             self._show_qr(preferred)
