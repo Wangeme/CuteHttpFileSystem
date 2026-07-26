@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -121,12 +122,30 @@ class AppConfig:
         }
 
     def save(self, config_path: Path) -> None:
-        """以 UTF-8 JSON 保存配置，不把密码或令牌写入日志。"""
+        """以 UTF-8 JSON 原子保存配置，不把密码或令牌写入日志。"""
 
         config_path = config_path.resolve()
         config_path.parent.mkdir(parents=True, exist_ok=True)
         text = json.dumps(self.to_dict(base_dir=config_path.parent), ensure_ascii=False, indent=2) + "\n"
-        config_path.write_text(text, encoding="utf-8")
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                dir=config_path.parent,
+                prefix=f".{config_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary.write(text)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary_path = Path(temporary.name)
+            os.replace(temporary_path, config_path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], *, base_dir: Path) -> "AppConfig":

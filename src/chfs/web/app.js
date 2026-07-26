@@ -6,6 +6,9 @@ const state = {
   token: sessionStorage.getItem("chfs_token") || "",
   principal: null,
   authenticationAvailable: false,
+  sharedTextRevision: -1,
+  sharedTextDirty: false,
+  sharedTextEditVersion: 0,
 };
 
 const elements = {
@@ -34,7 +37,15 @@ const elements = {
   toast: document.querySelector("#toast"),
   uploadButton: document.querySelector("#uploadButton"),
   newFolderButton: document.querySelector("#newFolderButton"),
+  sharedText: document.querySelector("#sharedText"),
+  sharedTextStatus: document.querySelector("#sharedTextStatus"),
+  sharedTextCount: document.querySelector("#sharedTextCount"),
+  refreshTextButton: document.querySelector("#refreshTextButton"),
+  copyTextButton: document.querySelector("#copyTextButton"),
+  pasteTextButton: document.querySelector("#pasteTextButton"),
+  clearTextButton: document.querySelector("#clearTextButton"),
 };
+let sharedTextSaveTimer;
 
 function headers(json = false) {
   const result = {};
@@ -85,11 +96,130 @@ function can(permission) {
 
 function updatePermissionControls() {
   const mayWrite = can("write");
+  const mayRead = can("read");
   elements.uploadButton.disabled = !mayWrite;
   elements.newFolderButton.disabled = !mayWrite;
+  elements.sharedText.disabled = !mayRead;
+  elements.sharedText.readOnly = !mayWrite;
+  elements.refreshTextButton.disabled = !mayRead;
+  elements.copyTextButton.disabled = !mayRead;
+  elements.pasteTextButton.disabled = !mayWrite;
+  elements.clearTextButton.disabled = !mayWrite;
+  if (!mayRead) {
+    elements.sharedText.value = "";
+    elements.sharedTextStatus.textContent = "当前身份没有读取权限";
+    state.sharedTextRevision = -1;
+    state.sharedTextDirty = false;
+    updateSharedTextCount();
+  }
   const hint = mayWrite ? "" : (state.authenticationAvailable ? "登录具有写入权限的账户后使用" : "服务端未开放写入权限");
   elements.uploadButton.title = hint;
   elements.newFolderButton.title = hint;
+  elements.pasteTextButton.title = hint;
+  elements.clearTextButton.title = hint;
+}
+
+function updateSharedTextCount() {
+  const bytes = new TextEncoder().encode(elements.sharedText.value).byteLength;
+  elements.sharedTextCount.textContent = `${elements.sharedText.value.length} 字符 · ${formatBytes(bytes)}`;
+}
+
+function presentSharedTextStatus(data, prefix = "已同步") {
+  const updated = data.updated_at ? new Date(data.updated_at).toLocaleString() : "尚未保存";
+  elements.sharedTextStatus.textContent = `${prefix} · ${updated} · 版本 ${data.revision}`;
+}
+
+async function loadSharedText(force = false) {
+  if (!can("read") || (state.sharedTextDirty && !force)) return;
+  try {
+    const data = await api("/api/v1/shared-text");
+    if (force || !state.sharedTextDirty) {
+      if (force) clearTimeout(sharedTextSaveTimer);
+      if (force || data.revision !== state.sharedTextRevision) elements.sharedText.value = data.text;
+      state.sharedTextRevision = data.revision;
+      state.sharedTextDirty = false;
+      updateSharedTextCount();
+      presentSharedTextStatus(data);
+    }
+  } catch (error) {
+    elements.sharedTextStatus.textContent = error.message;
+  }
+}
+
+function scheduleSharedTextSave(delay = 600) {
+  if (!can("write")) return;
+  clearTimeout(sharedTextSaveTimer);
+  sharedTextSaveTimer = setTimeout(saveSharedText, delay);
+}
+
+async function saveSharedText(showToast = false) {
+  if (!can("write")) return;
+  clearTimeout(sharedTextSaveTimer);
+  const editVersion = state.sharedTextEditVersion;
+  const text = elements.sharedText.value;
+  elements.sharedTextStatus.textContent = "正在保存…";
+  try {
+    const data = await api("/api/v1/shared-text", {
+      method: "PUT",
+      json: true,
+      body: JSON.stringify({ text }),
+    });
+    state.sharedTextRevision = data.revision;
+    if (state.sharedTextEditVersion === editVersion) {
+      state.sharedTextDirty = false;
+      presentSharedTextStatus(data, "自动保存");
+    } else {
+      scheduleSharedTextSave();
+    }
+    if (showToast) toast("共享文本已同步");
+  } catch (error) {
+    elements.sharedTextStatus.textContent = error.message;
+    toast(error.message, true);
+  }
+}
+
+async function copySharedText() {
+  const text = elements.sharedText.value;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    elements.sharedText.focus();
+    elements.sharedText.select();
+    if (!document.execCommand("copy")) {
+      toast("浏览器禁止自动复制，请长按文本手动复制", true);
+      return;
+    }
+  }
+  toast("文本已复制");
+}
+
+async function pasteSharedText() {
+  try {
+    const text = await navigator.clipboard.readText();
+    const start = elements.sharedText.selectionStart;
+    const end = elements.sharedText.selectionEnd;
+    elements.sharedText.setRangeText(text, start, end, "end");
+    markSharedTextDirty();
+    elements.sharedText.focus();
+  } catch {
+    elements.sharedText.focus();
+    toast("浏览器不允许直接读取剪贴板，请长按文本框选择“粘贴”", true);
+  }
+}
+
+function clearSharedText() {
+  if (!window.confirm("确定清空共享文本吗？其他设备也会同步清空。")) return;
+  elements.sharedText.value = "";
+  markSharedTextDirty(0);
+  elements.sharedText.focus();
+}
+
+function markSharedTextDirty(delay = 600) {
+  state.sharedTextDirty = true;
+  state.sharedTextEditVersion += 1;
+  elements.sharedTextStatus.textContent = "正在等待自动保存…";
+  updateSharedTextCount();
+  scheduleSharedTextSave(delay);
 }
 
 async function loadFiles() {
@@ -237,6 +367,8 @@ async function uploadFiles(files) {
     lastSpeedBytes: 0,
     // performance.now() 使用单调时钟，适合计算两次刷新之间的耗时。
     lastSpeedTime: performance.now(),
+    // 高频 progress 事件只累计字节；界面最多约每 100 ms 重绘一次。
+    lastRenderTime: 0,
     // 最近一次计算得到的上传速度，单位为字节/秒。
     speed: 0,
   };
@@ -289,7 +421,7 @@ async function uploadOne(file, path, batch, index) {
     // 声明目标路径、文件总大小、续传标识，并禁止静默覆盖同名文件。
     body: JSON.stringify({ path, size: file.size, resume_key: resumeKey, overwrite: false }),
   });
-  // 分块大小由服务端决定，当前默认值是 16 MiB。
+  // 分块大小由服务端决定；大块可减少高速局域网中的请求确认空档。
   const chunkSize = session.chunk_size;
   // 默认快速模式不重复读取并哈希已经上传的前缀。
   // offset 大于零说明服务端临时文件中已经保存了一部分数据。
@@ -298,17 +430,10 @@ async function uploadOne(file, path, batch, index) {
     updateUploadDisplay(batch, file, index, session.offset, "从断点继续");
   }
 
-  // 只在还有未上传内容时读取首个分块；文件已经完整上传时直接进入提交阶段。
-  let prepared = session.offset < file.size ? await prepareUploadChunk(file, session.offset, chunkSize) : null;
-  // prepared 为 null 表示没有更多分块需要发送。
+  // slice() 只创建 Blob 文件视图，XHR 直接从文件向网络层流式读取。
+  // 这里不再把整个分块复制到 JavaScript ArrayBuffer。
+  let prepared = session.offset < file.size ? prepareUploadChunk(file, session.offset, chunkSize) : null;
   while (prepared) {
-    // 在当前分块传输期间并行预读下一分块，减少磁盘等待。
-    // 当前分块不是最后一块时，立即启动下一块的读取任务。
-    const nextPromise = prepared.end < file.size
-      // Promise 现在开始读取下一块，但下面并不会同时发送它。
-      ? prepareUploadChunk(file, prepared.end, chunkSize)
-      // 当前已经是最后一块，用一个立即完成的 Promise 统一后续控制流。
-      : Promise.resolve(null);
     // 分块真正发出前，把界面进度定位到该分块的起始偏移。
     updateUploadDisplay(batch, file, index, prepared.position, "准备上传");
     // 等待当前 PATCH 请求完整结束；因此同一时刻只有一个分块请求在传输。
@@ -317,22 +442,27 @@ async function uploadOne(file, path, batch, index) {
       session.upload_id,
       // 当前分块在完整文件中的起始字节位置。
       prepared.position,
-      // 已读入内存的 ArrayBuffer；这就是 XHR 的请求体。
-      prepared.bytes,
+      // Blob 直接交给浏览器网络栈，不经过 JavaScript 连续内存副本。
+      prepared.body,
       // 传入文件总大小；当前 sendChunk() 尚未实际使用这个参数。
       file.size,
       // XHR 每次报告上传进度时都会调用此回调。
       (loaded, networkDelta) => {
         // 累加从上一次进度事件到本次事件新增的网络字节数。
         batch.networkBytes += networkDelta;
-        // “分块起点 + 分块内已发送量”就是当前文件的可视进度。
-        updateUploadDisplay(batch, file, index, prepared.position + loaded, "正在上传");
+        // 移动浏览器可能非常频繁地触发 progress。每次更新多个 DOM 节点会与
+        // 网络发送竞争主线程，因此只在 100 ms 到期或当前分块结束时重绘。
+        const now = performance.now();
+        if (now - batch.lastRenderTime >= 100 || loaded >= prepared.body.size) {
+          batch.lastRenderTime = now;
+          // “分块起点 + 分块内已发送量”就是当前文件的可视进度。
+          updateUploadDisplay(batch, file, index, prepared.position + loaded, "正在上传");
+        }
       },
     );
     // PATCH 成功后，以服务端返回的 offset 为准更新界面。
     updateUploadDisplay(batch, file, index, session.offset, "分块已写入");
-    // 等待预读任务完成，并把下一分块设为新的当前分块。
-    prepared = await nextPromise;
+    prepared = session.offset < file.size ? prepareUploadChunk(file, session.offset, chunkSize) : null;
   }
   // 所有字节已到达临时文件，接下来要求服务端持久化并原子发布目标文件。
   updateUploadDisplay(batch, file, index, file.size, "正在原子提交");
@@ -353,22 +483,21 @@ async function uploadOne(file, path, batch, index) {
   elements.progress.value = 100;
 }
 
-async function prepareUploadChunk(file, position, chunkSize) {
+function prepareUploadChunk(file, position, chunkSize) {
   // 计算分块结束位置；最后一块不足 chunkSize 时不能越过文件末尾。
   const end = Math.min(position + chunkSize, file.size);
-  // slice() 创建 Blob 视图，arrayBuffer() 再把这一段完整复制/读取到连续内存。
-  const bytes = await file.slice(position, end).arrayBuffer();
-  // 同时返回起点、终点和内存数据，发送循环需要用它们推进偏移。
-  return { position, end, bytes };
+  // slice() 创建轻量 Blob 视图；浏览器在 xhr.send() 时按需读取文件内容。
+  const body = file.slice(position, end);
+  return { position, end, body };
 }
 
-async function sendChunkWithRetry(uploadId, offset, bytes, totalSize, onProgress) {
+async function sendChunkWithRetry(uploadId, offset, body, totalSize, onProgress) {
   // 保存最后一次异常；三次都失败后把它抛给上层。
   let lastError;
   // 当前策略最多尝试三次，并且每次都重传整个分块。
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     // sendChunk 成功时立即返回服务端的新会话状态。
-    try { return await sendChunk(uploadId, offset, bytes, totalSize, onProgress); }
+    try { return await sendChunk(uploadId, offset, body, totalSize, onProgress); }
     // 网络错误或非 2xx 响应都会进入这里。
     catch (error) {
       // 覆盖保存最新错误，使最终提示反映最后一次失败。
@@ -381,7 +510,7 @@ async function sendChunkWithRetry(uploadId, offset, bytes, totalSize, onProgress
   throw lastError;
 }
 
-function sendChunk(uploadId, offset, bytes, totalSize, onProgress) {
+function sendChunk(uploadId, offset, body, totalSize, onProgress) {
   // XMLHttpRequest 是事件式 API，这里用 Promise 包装成可 await 的形式。
   return new Promise((resolve, reject) => {
     // 记录上一次 progress 事件的累计值，用来计算本次新增流量。
@@ -418,8 +547,8 @@ function sendChunk(uploadId, offset, bytes, totalSize, onProgress) {
     });
     // DNS、断网等传输层错误没有正常 HTTP 响应，会触发 error。
     xhr.addEventListener("error", () => reject(new Error("网络连接中断，正在重试")));
-    // 真正开始发送 ArrayBuffer；调用后浏览器才把该分块送入网络栈。
-    xhr.send(bytes);
+    // Blob 由浏览器直接读取并送入网络栈。
+    xhr.send(body);
   });
 }
 
@@ -470,6 +599,7 @@ elements.loginButton.addEventListener("click", async () => {
     state.token = "";
     sessionStorage.removeItem("chfs_token");
     await refreshSession();
+    await loadSharedText(true);
     await loadFiles();
   } else elements.loginDialog.showModal();
 });
@@ -489,6 +619,7 @@ elements.loginForm.addEventListener("submit", async event => {
     elements.loginDialog.close();
     elements.loginForm.reset();
     await refreshSession();
+    await loadSharedText(true);
     await loadFiles();
   } catch (error) { elements.loginError.textContent = error.message; }
 });
@@ -509,11 +640,28 @@ elements.folderForm.addEventListener("submit", async event => {
 document.querySelector("#uploadButton").addEventListener("click", () => elements.filePicker.click());
 elements.filePicker.addEventListener("change", () => { if (elements.filePicker.files.length) uploadFiles([...elements.filePicker.files]); elements.filePicker.value = ""; });
 document.querySelector("#refreshButton").addEventListener("click", loadFiles);
+elements.sharedText.addEventListener("input", () => {
+  markSharedTextDirty();
+});
+elements.sharedText.addEventListener("keydown", event => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    saveSharedText(true);
+  }
+});
+elements.refreshTextButton.addEventListener("click", () => loadSharedText(true));
+elements.copyTextButton.addEventListener("click", copySharedText);
+elements.pasteTextButton.addEventListener("click", pasteSharedText);
+elements.clearTextButton.addEventListener("click", clearSharedText);
 for (const name of ["dragenter", "dragover"]) elements.dropZone.addEventListener(name, event => { event.preventDefault(); elements.dropZone.classList.add("dragging"); });
 for (const name of ["dragleave", "drop"]) elements.dropZone.addEventListener(name, event => { event.preventDefault(); elements.dropZone.classList.remove("dragging"); });
 elements.dropZone.addEventListener("drop", event => { if (event.dataTransfer.files.length) uploadFiles([...event.dataTransfer.files]); });
 
 (async function start() {
-  try { await refreshSession(); await loadFiles(); }
+  try {
+    await refreshSession();
+    await Promise.all([loadSharedText(true), loadFiles()]);
+    window.setInterval(() => loadSharedText(false), 3000);
+  }
   catch (error) { document.querySelector("#connectionState").textContent = "服务不可用"; toast(error.message, true); }
 })();

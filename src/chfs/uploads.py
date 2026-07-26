@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import secrets
@@ -11,7 +12,7 @@ from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, BinaryIO
 
 from .errors import (
     IntegrityMismatchError,
@@ -23,8 +24,8 @@ from .models import FileEntry, Permission, Principal
 from .paths import FullDiskPathResolver, SafePathResolver
 from .security import require
 
-DEFAULT_CHUNK_SIZE = 16 * 1024 * 1024
-MAX_CHUNK_SIZE = 32 * 1024 * 1024
+DEFAULT_CHUNK_SIZE = 128 * 1024 * 1024
+MAX_CHUNK_SIZE = 128 * 1024 * 1024
 SESSION_TTL_SECONDS = 24 * 60 * 60
 
 
@@ -45,8 +46,61 @@ class UploadSession:
     started_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     receiving: bool = False
+    receiving_bytes: int = 0
     full_hasher: Any = field(default_factory=hashlib.sha256, repr=False)
     manifest_hasher: Any = field(default_factory=hashlib.sha256, repr=False)
+    append_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+
+def _write_and_hash(
+    stream: BinaryIO,
+    data: bytes,
+    full_hasher: Any,
+    chunk_hasher: Any | None,
+) -> int:
+    """在线程池中完整写入一段网络数据，并同步推进对应哈希状态。"""
+
+    view = memoryview(data)
+    written = 0
+    while written < len(view):
+        count = stream.write(view[written:])
+        if not count:
+            raise OSError("临时文件写入未取得进展")
+        written += count
+    full_hasher.update(data)
+    if chunk_hasher is not None:
+        chunk_hasher.update(data)
+    return written
+
+
+def _truncate_file(path: Path, offset: int) -> None:
+    """把失败请求已经写入的尾部裁掉，恢复到服务端确认偏移。"""
+
+    with path.open("r+b", buffering=0) as stream:
+        stream.truncate(offset)
+
+
+async def _write_and_hash_without_orphaning(
+    stream: BinaryIO,
+    data: bytes,
+    full_hasher: Any,
+    chunk_hasher: Any | None,
+) -> int:
+    """任务取消时也等待已进入线程池的写操作结束，避免写入与回滚竞态。"""
+
+    write_task = asyncio.create_task(
+        asyncio.to_thread(_write_and_hash, stream, data, full_hasher, chunk_hasher)
+    )
+    try:
+        return await asyncio.shield(write_task)
+    except asyncio.CancelledError:
+        # to_thread 的底层线程不能被强制取消。必须先等它退出，外层才能安全
+        # truncate；否则断线回滚可能与尚未结束的写操作同时修改临时文件。
+        try:
+            await write_task
+        except BaseException:
+            pass
+        raise
 
 
 class ResumableUploadManager:
@@ -160,75 +214,81 @@ class ResumableUploadManager:
         require(principal, Permission.WRITE)
         # 按上传 ID 取回会话，同时校验会话是否存在且属于当前用户。
         session = self._get(principal, upload_id)
-        # 客户端偏移必须等于服务端已写入长度，否则顺序或重试状态已经不一致。
-        if offset != session.offset:
-            raise ResourceConflictError(f"上传偏移不匹配，当前偏移为 {session.offset}")
         # SHA-256 的十六进制文本固定为 64 个字符；None 表示快速模式不校验分块。
         if declared_sha256 is not None and len(declared_sha256) != 64:
             raise IntegrityMismatchError("分块 SHA-256 格式无效")
 
-        # 修改会话共享状态时加锁，避免监控线程读到一半更新的数据。
-        with self._lock:
-            # 标记当前会话正在接收请求体。
-            session.receiving = True
-            # 刷新最后活动时间，供过期回收逻辑判断。
-            session.updated_at = time.time()
-        # try/finally 保证成功或失败后都会清除 receiving 标记。
-        try:
-            # 单次请求最多只保留 MAX_CHUNK_SIZE，文件总大小不影响进程内存占用。
-            # 为当前 HTTP 请求创建一块可增长的连续内存。
-            buffer = bytearray()
-            # request.stream() 会异步产出网络层陆续收到的小块 bytes。
-            async for chunk in chunks:
-                # 把所有网络小块复制并拼接到同一个 bytearray 中。
-                buffer.extend(chunk)
-                # 每次扩展后检查上限，防止客户端用超大请求耗尽内存。
-                if len(buffer) > MAX_CHUNK_SIZE:
-                    raise UploadTooLargeError("单个上传分块超过 32 MiB")
-            # 非空文件不接受空 PATCH，避免 offset 没有推进却返回成功。
-            if not buffer and session.expected_size != 0:
-                raise ResourceConflictError("上传分块不能为空")
-            # 当前偏移加本块长度不能超过创建会话时声明的文件总大小。
-            if session.offset + len(buffer) > session.expected_size:
-                raise UploadTooLargeError("收到的数据超过声明的文件大小")
+        # 每个会话只允许一个 PATCH 修改临时文件；等待锁的并发请求会在取得锁后
+        # 重新检查 offset，因此重试和乱序请求不会交叉写入。
+        async with session.append_lock:
+            if offset != session.offset:
+                raise ResourceConflictError(f"上传偏移不匹配，当前偏移为 {session.offset}")
 
-            # 默认没有分块摘要；快速模式会保持 None。
-            actual_digest = None
-            # 只有客户端提供摘要时才额外计算当前分块的 SHA-256。
-            if declared_sha256 is not None:
-                # 对已经完整缓存的分块做一次同步哈希计算，结果是 32 字节摘要。
-                actual_digest = hashlib.sha256(buffer).digest()
-                # 常量时间比较可避免普通字符串比较带来的时序侧信道。
-                if not secrets.compare_digest(actual_digest.hex(), declared_sha256.casefold()):
+            with self._lock:
+                session.receiving = True
+                session.updated_at = time.time()
+
+            # hashlib 状态可复制。若请求中断、过大或摘要不匹配，临时文件和完整
+            # 文件哈希都能恢复到本请求开始前，客户端可从原 offset 安全重试。
+            full_hasher_before = session.full_hasher.copy()
+            chunk_hasher = hashlib.sha256() if declared_sha256 is not None else None
+            received = 0
+            try:
+                # 不把完整请求拼成 bytearray。request.stream() 每产出
+                # 一段 bytes，就在线程池写盘并增量哈希，使内存规模由 ASGI 小块决定。
+                with session.temporary.open("r+b", buffering=0) as stream:
+                    stream.seek(offset)
+                    async for chunk in chunks:
+                        if not chunk:
+                            continue
+                        next_received = received + len(chunk)
+                        if next_received > MAX_CHUNK_SIZE:
+                            raise UploadTooLargeError("单个上传分块超过 128 MiB")
+                        if offset + next_received > session.expected_size:
+                            raise UploadTooLargeError("收到的数据超过声明的文件大小")
+                        written = await _write_and_hash_without_orphaning(
+                            stream,
+                            chunk,
+                            session.full_hasher,
+                            chunk_hasher,
+                        )
+                        received += written
+                        # offset 是协议确认点，只有完整 PATCH 成功后才能推进；另用
+                        # receiving_bytes 暴露请求内的实时进度，避免 128 MiB 分块
+                        # 完成前桌面速率长期为 0、完成瞬间又跳到极高值。
+                        with self._lock:
+                            session.receiving_bytes = received
+                            session.updated_at = time.time()
+
+                if received == 0 and session.expected_size != 0:
+                    raise ResourceConflictError("上传分块不能为空")
+
+                actual_digest = chunk_hasher.digest() if chunk_hasher is not None else None
+                if actual_digest is not None and not secrets.compare_digest(
+                    actual_digest.hex(), declared_sha256.casefold()
+                ):
                     raise IntegrityMismatchError("分块完整性校验失败，请重传该分块")
 
-            # append 由偏移检查保证顺序；写入成功后才推进会话状态。
-            # 写文件和更新会话必须作为一个受锁保护的逻辑整体执行。
-            with self._lock:
-                # 获取锁后再次检查偏移，防止两个并发 PATCH 都通过第一次检查。
-                if offset != session.offset:
-                    raise ResourceConflictError(f"上传偏移不匹配，当前偏移为 {session.offset}")
-                # 以无缓冲追加模式打开临时文件；每个请求都会进行一次打开和关闭。
-                with session.temporary.open("ab", buffering=0) as stream:
-                    # 同步把整个 bytearray 写入操作系统文件接口；这里会阻塞当前事件循环线程。
-                    stream.write(buffer)
-                # 用同一份内存数据增量计算完整文件的 SHA-256，同样是同步 CPU 工作。
-                session.full_hasher.update(buffer)
-                # 严格校验模式下，把每个分块的二进制摘要加入“摘要清单”的哈希。
-                if actual_digest is not None:
-                    session.manifest_hasher.update(actual_digest)
-                # 只有写入和哈希均成功后，才推进服务端确认偏移。
-                session.offset += len(buffer)
-                # 记录这次成功写入后的时间。
-                session.updated_at = time.time()
-            # 返回更新后的会话，由 HTTP 层把新 offset 发回浏览器。
-            return session
-        # 无论读取、校验或写盘在哪一步失败，都执行 finally。
-        finally:
-            # 清除共享状态仍然需要持锁。
-            with self._lock:
-                # 表示当前 HTTP 分块请求已经结束。
-                session.receiving = False
+                # 只有网络读取、写盘和可选分块校验全部成功后才公开新 offset。
+                with self._lock:
+                    if offset != session.offset:
+                        raise ResourceConflictError(f"上传偏移不匹配，当前偏移为 {session.offset}")
+                    if actual_digest is not None:
+                        session.manifest_hasher.update(actual_digest)
+                    session.offset += received
+                    session.receiving_bytes = 0
+                    session.updated_at = time.time()
+                return session
+            except BaseException:
+                session.full_hasher = full_hasher_before
+                # 写盘已经发生但 offset 尚未确认时，必须裁掉失败请求的尾部。
+                # 即使错误发生在摘要校验阶段，也能恢复可续传的一致状态。
+                _truncate_file(session.temporary, offset)
+                raise
+            finally:
+                with self._lock:
+                    session.receiving = False
+                    session.receiving_bytes = 0
 
     def complete(
         self,
@@ -323,7 +383,10 @@ class ResumableUploadManager:
                     "path": session.public_path,
                     "owner": session.owner,
                     "source": session.source,
-                    "transferred_bytes": session.offset,
+                    "transferred_bytes": min(
+                        session.expected_size,
+                        session.offset + session.receiving_bytes,
+                    ),
                     "total_bytes": session.expected_size,
                     "bytes_per_second": session.offset / elapsed,
                     "status": "uploading" if session.receiving else "waiting",

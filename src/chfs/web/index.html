@@ -34,6 +34,27 @@
         </div>
       </section>
 
+      <section class="text-panel" aria-labelledby="sharedTextTitle">
+        <div class="text-panel-heading">
+          <div>
+            <p class="eyebrow">跨设备剪贴板</p>
+            <h2 id="sharedTextTitle">共享文本</h2>
+          </div>
+          <div class="text-actions">
+            <button id="copyTextButton" class="button button-quiet" type="button">复制</button>
+            <button id="pasteTextButton" class="button button-secondary" type="button">粘贴</button>
+            <button id="clearTextButton" class="button button-danger" type="button">清空</button>
+            <button id="refreshTextButton" class="button button-secondary" type="button">刷新</button>
+          </div>
+        </div>
+        <textarea id="sharedText" rows="6" maxlength="1048576" spellcheck="false"
+          placeholder="在手机或电脑粘贴文本，停止输入后会自动同步。"></textarea>
+        <div class="text-meta">
+          <span id="sharedTextStatus">正在读取…</span>
+          <span id="sharedTextCount">0 字符</span>
+        </div>
+      </section>
+
       <section id="dropZone" class="file-panel" aria-live="polite">
         <div class="file-toolbar">
           <div id="itemCount" class="item-count">正在读取…</div>

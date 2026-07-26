@@ -108,12 +108,17 @@ class HttpIntegrationTests(unittest.TestCase):
         self.assertIn('type="file" multiple', html)
         self.assertIn('id="uploadSpeed"', html)
         self.assertIn('id="uploadOverallProgress"', html)
+        self.assertIn('id="sharedText"', html)
+        self.assertIn('id="pasteTextButton"', html)
+        self.assertIn('id="clearTextButton"', html)
         normalized = {key.casefold(): value for key, value in headers.items()}
         self.assertIn("default-src 'self'", normalized["content-security-policy"])
         status, body, _ = self.request("GET", "/assets/app.js")
         self.assertEqual(status, 200)
         self.assertIn(b"loadFiles", body)
         self.assertIn(b"createPixelIcon", body)
+        self.assertIn(b"xhr.send(body)", body)
+        self.assertNotIn(b".arrayBuffer()", body)
         self.assertNotIn(b'type.textContent = entry.type === "directory" ? "DIR" : "FILE"', body)
         status, body, _ = self.request("GET", "/assets/sha256.js")
         self.assertEqual(status, 200)
@@ -134,6 +139,41 @@ class HttpIntegrationTests(unittest.TestCase):
         status, body, _ = self.request("PUT", "/api/v1/content?path=no.txt", body=b"no")
         self.assertEqual(status, 403)
         self.assertEqual(json.loads(body)["error"]["code"], "permission_denied")
+        status, body, _ = self.request("GET", "/api/v1/shared-text")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(json.loads(body)["text"], str)
+        status, body, _ = self.request(
+            "PUT",
+            "/api/v1/shared-text",
+            body=json.dumps({"text": "no"}).encode(),
+            content_type="application/json",
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["error"]["code"], "permission_denied")
+
+    def test_authenticated_shared_text_syncs_across_clients(self) -> None:
+        login_body = json.dumps({"username": "operator", "password": "correct horse"}).encode()
+        _, body, _ = self.request("POST", "/api/v1/session", body=login_body, content_type="application/json")
+        token = json.loads(body)["token"]
+        shared = "电脑复制到手机\nhttps://example.test/?q=中文"
+        status, body, _ = self.request(
+            "PUT",
+            "/api/v1/shared-text",
+            body=json.dumps({"text": shared}, ensure_ascii=False).encode("utf-8"),
+            token=token,
+            content_type="application/json; charset=utf-8",
+        )
+        self.assertEqual(status, 200)
+        saved = json.loads(body)
+        self.assertEqual(saved["text"], shared)
+        self.assertGreater(saved["revision"], 0)
+
+        status, body, _ = self.request("GET", "/api/v1/shared-text")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["text"], shared)
+        state_file = self.base / ".shared.chfs-state" / "shared-text.json"
+        self.assertTrue(state_file.exists())
+        self.assertEqual(json.loads(state_file.read_text(encoding="utf-8"))["text"], shared)
 
     def test_authenticated_file_lifecycle_and_audit(self) -> None:
         login_body = json.dumps({"username": "operator", "password": "correct horse"}).encode()

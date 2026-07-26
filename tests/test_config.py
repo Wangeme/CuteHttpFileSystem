@@ -68,6 +68,33 @@ class AppConfigTests(unittest.TestCase):
             with patch("chfs.config.default_downloads_directory", return_value=downloads):
                 self.assertEqual(default_share_root(), downloads / "CHFShare")
 
+    def test_save_atomically_replaces_config_and_cleans_temporary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            config_path = base / "config.json"
+            first = AppConfig(share_root=base / "first", port=8080)
+            second = AppConfig(share_root=base / "second", port=9090)
+
+            first.save(config_path)
+            second.save(config_path)
+
+            self.assertEqual(AppConfig.load(config_path), second)
+            self.assertEqual(list(base.glob(".config.json.*.tmp")), [])
+
+    def test_failed_atomic_replace_preserves_previous_config(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            config_path = base / "config.json"
+            original = AppConfig(share_root=base / "original")
+            original.save(config_path)
+
+            with patch("chfs.config.os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    AppConfig(share_root=base / "new").save(config_path)
+
+            self.assertEqual(AppConfig.load(config_path), original)
+            self.assertEqual(list(base.glob(".config.json.*.tmp")), [])
+
 
 if __name__ == "__main__":
     unittest.main()
