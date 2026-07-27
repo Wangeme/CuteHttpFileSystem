@@ -18,7 +18,9 @@ class ResumableUploadManagerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "shared"
-        self.manager = ResumableUploadManager(SafePathResolver(self.root), max_upload_bytes=64 * 1024 * 1024)
+        resolver = SafePathResolver(self.root)
+        self.root = resolver.root
+        self.manager = ResumableUploadManager(resolver, max_upload_bytes=64 * 1024 * 1024)
         self.principal = Principal("guest", frozenset({Permission.WRITE}), False)
 
     async def asyncTearDown(self) -> None:

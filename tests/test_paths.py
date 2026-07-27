@@ -13,6 +13,9 @@ class SafePathResolverTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "shared"
         self.resolver = SafePathResolver(self.root)
+        # Windows 可能把临时目录的 8.3 短路径规范化成长路径；断言统一使用解析器
+        # 保存的最终路径，避免把同一目录的两种文本表示误判为不同目录。
+        self.root = self.resolver.root
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -27,6 +30,7 @@ class SafePathResolverTests(unittest.TestCase):
 
     def test_root_empty_path_is_accepted(self) -> None:
         self.assertEqual(self.resolver.resolve(""), self.root)
+        self.assertEqual(self.resolver.root, self.resolver.root.resolve())
 
     def test_full_disk_resolver_exposes_virtual_drive_roots(self) -> None:
         drive_c = self.root / "drive-c"

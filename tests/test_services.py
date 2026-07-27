@@ -15,7 +15,9 @@ class FileServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "shared"
-        self.service = FileService(SafePathResolver(self.root), max_upload_bytes=8)
+        resolver = SafePathResolver(self.root)
+        self.root = resolver.root
+        self.service = FileService(resolver, max_upload_bytes=8)
         self.reader = Principal("reader", frozenset({Permission.READ}), True)
         self.writer = Principal("writer", frozenset({Permission.READ, Permission.WRITE, Permission.DELETE}), True)
 

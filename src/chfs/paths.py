@@ -19,8 +19,12 @@ class SafePathResolver:
     """
 
     def __init__(self, root: Path) -> None:
-        self.root = root.expanduser().resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        # Windows Runner 的临时目录可能以 RUNNER~1 这类 8.3 短路径传入。
+        # 目录不存在时 resolve() 无法取得最终长路径，因此必须先创建，再保存
+        # 一次稳定的规范路径；后续 relative_to() 才不会把同一目录误判为越界。
+        expanded_root = root.expanduser()
+        expanded_root.mkdir(parents=True, exist_ok=True)
+        self.root = expanded_root.resolve()
 
     def resolve(self, user_path: str | None) -> Path:
         raw = (user_path or "").replace("\\", "/")
