@@ -12,6 +12,8 @@ const state = {
 };
 
 const elements = {
+  folderPicker: document.querySelector("#folderPicker"),
+  uploadFolderButton: document.querySelector("#uploadFolderButton"),
   rows: document.querySelector("#fileRows"),
   empty: document.querySelector("#emptyState"),
   loading: document.querySelector("#loadingState"),
@@ -98,6 +100,7 @@ function updatePermissionControls() {
   const mayWrite = can("write");
   const mayRead = can("read");
   elements.uploadButton.disabled = !mayWrite;
+  elements.uploadFolderButton.disabled = !mayWrite;
   elements.newFolderButton.disabled = !mayWrite;
   elements.sharedText.disabled = !mayRead;
   elements.sharedText.readOnly = !mayWrite;
@@ -114,6 +117,7 @@ function updatePermissionControls() {
   }
   const hint = mayWrite ? "" : (state.authenticationAvailable ? "登录具有写入权限的账户后使用" : "服务端未开放写入权限");
   elements.uploadButton.title = hint;
+  elements.uploadFolderButton.title = hint;
   elements.newFolderButton.title = hint;
   elements.pasteTextButton.title = hint;
   elements.clearTextButton.title = hint;
@@ -350,7 +354,7 @@ async function removeEntry(entry) {
   } catch (error) { toast(error.message, true); }
 }
 
-async function uploadFiles(files) {
+async function uploadFiles(files, pathForFile = file => file.name) {
   // 上传前再次检查当前身份是否拥有写权限；没有权限时立即结束，不创建上传会话。
   if (!can("write")) { toast(state.authenticationAvailable ? "当前身份没有上传权限，请先登录" : "服务端未开放上传权限", true); return; }
   // batch 保存“这一批文件”的统计状态，供进度条和实时速度计算共同使用。
@@ -376,8 +380,8 @@ async function uploadFiles(files) {
   elements.tray.hidden = false;
   // 逐个遍历用户选择的文件；这里的 await 使多个文件也是串行上传。
   for (const [index, file] of files.entries()) {
-    // 根据当前浏览目录和文件名生成服务端目标路径。
-    const path = joinPath(file.name);
+    // 普通上传使用文件名；文件夹上传传入带目录层级的相对路径。
+    const path = joinPath(pathForFile(file));
     // 等待当前文件上传完成后才会进入下一个文件。
     try { await uploadOne(file, path, batch, index); }
     // 任一文件失败就提示错误、隐藏面板并终止整个批次。
@@ -395,6 +399,66 @@ async function uploadFiles(files) {
   toast(`已上传 ${files.length} 个文件`);
   // 重新读取服务端目录，让新上传的文件出现在文件列表中。
   await loadFiles();
+}
+
+function folderRelativePath(file) {
+  // webkitRelativePath 由浏览器的文件夹选择器提供，例如“照片/旅行/a.jpg”。
+  const rawPath = file.webkitRelativePath;
+  if (typeof rawPath !== "string" || !rawPath) throw new Error(`无法读取“${file.name}”的文件夹路径`);
+
+  // 浏览器通常使用正斜杠；同时兼容可能出现的 Windows 反斜杠。
+  const parts = rawPath.replaceAll("\\", "/").split("/");
+  // 不接受空片段和相对跳转，避免客户端构造出含义不明确的目标路径。
+  if (parts.length < 2 || parts.some(part => !part || part === "." || part === "..")) {
+    throw new Error(`文件夹路径无效：${rawPath}`);
+  }
+  return parts.join("/");
+}
+
+function folderUploadPlan(files) {
+  const paths = new Map();
+  const directories = new Set();
+
+  for (const file of files) {
+    const relativePath = folderRelativePath(file);
+    paths.set(file, relativePath);
+    const parts = relativePath.split("/");
+
+    // 收集从根文件夹到文件父目录的每一级路径，并用 Set 自动去重。
+    for (let depth = 1; depth < parts.length; depth += 1) {
+      directories.add(parts.slice(0, depth).join("/"));
+    }
+  }
+
+  // 父目录必须先于子目录创建；同一深度按名称排序，使执行顺序稳定可复现。
+  const orderedDirectories = [...directories].sort((left, right) => {
+    const depthDifference = left.split("/").length - right.split("/").length;
+    return depthDifference || left.localeCompare(right, "zh-CN");
+  });
+  return { paths, directories: orderedDirectories };
+}
+
+async function uploadFolder(files) {
+  if (!can("write")) {
+    toast(state.authenticationAvailable ? "当前身份没有上传权限，请先登录" : "服务端未开放上传权限", true);
+    return;
+  }
+
+  try {
+    // 在修改服务端状态前先验证全部文件路径，避免无效文件夹留下半成品目录。
+    const plan = folderUploadPlan(files);
+    for (const directory of plan.directories) {
+      await api("/api/v1/directories", {
+        method: "POST",
+        json: true,
+        body: JSON.stringify({ path: joinPath(directory) }),
+      });
+    }
+    await uploadFiles(files, file => plan.paths.get(file));
+  } catch (error) {
+    toast(`上传文件夹失败：${error.message}`, true);
+    await loadFiles();
+  }
 }
 
 async function uploadOne(file, path, batch, index) {
@@ -635,6 +699,17 @@ elements.folderForm.addEventListener("submit", async event => {
     await api("/api/v1/directories", { method: "POST", json: true, body: JSON.stringify({ path: joinPath(name) }) });
     elements.folderDialog.close(); elements.folderForm.reset(); toast("文件夹已创建"); await loadFiles();
   } catch (error) { elements.folderError.textContent = error.message; }
+});
+
+elements.uploadFolderButton.addEventListener("click", () => {
+  elements.folderPicker.click();
+});
+
+elements.folderPicker.addEventListener("change", async () => {
+  const files = [...elements.folderPicker.files];
+  // 先清空选择器，使用户在失败后仍能立即重新选择同一个文件夹。
+  elements.folderPicker.value = "";
+  if (files.length) await uploadFolder(files);
 });
 
 document.querySelector("#uploadButton").addEventListener("click", () => elements.filePicker.click());
