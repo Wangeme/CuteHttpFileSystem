@@ -238,6 +238,25 @@ class CHFSApplication(tk.Tk):
         style.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT, rowheight=25, borderwidth=0, font=("Cascadia Mono", 8))
         style.configure("Treeview.Heading", background=SURFACE_ALT, foreground=MUTED, padding=6, borderwidth=1, font=("Microsoft YaHei UI", 8))
         style.map("Treeview", background=[("selected", ACCENT_DARK)])
+        # 概览页是最常用的操作面板，默认 ttk 滚动条在高 DPI 屏幕上只有很窄的
+        # 点击区域。单独提供 20 px 宽的大控件样式，不影响其他设置页的布局。
+        style.configure(
+            "Overview.Vertical.TScrollbar",
+            gripcount=0,
+            background="#49606e",
+            troughcolor="#091119",
+            bordercolor=BORDER,
+            lightcolor="#49606e",
+            darkcolor="#49606e",
+            arrowcolor=TEXT,
+            width=20,
+            arrowsize=18,
+        )
+        style.map(
+            "Overview.Vertical.TScrollbar",
+            background=[("pressed", ACCENT_DARK), ("active", "#617987")],
+            arrowcolor=[("pressed", "#ffffff"), ("active", "#ffffff")],
+        )
 
     def _build_shell(self) -> None:
         self.columnconfigure(1, weight=1)
@@ -458,7 +477,7 @@ class CHFSApplication(tk.Tk):
 
         upper.bind("<Configure>", self._reflow_overview)
 
-        shared_text = ttk.Frame(self.content, style="Surface.TFrame", padding=(16, 12), height=170)
+        shared_text = ttk.Frame(self.content, style="Surface.TFrame", padding=(16, 12), height=200)
         shared_text.pack(fill="x", pady=(12, 0))
         shared_text.pack_propagate(False)
         self._overview_shared_text = shared_text
@@ -496,10 +515,15 @@ class CHFSApplication(tk.Tk):
                 minwidth=35,
                 stretch=name == "action",
             )
-        overview_scroll = ttk.Scrollbar(recent, orient="vertical", command=self.overview_log_tree.yview)
+        overview_scroll = ttk.Scrollbar(
+            recent,
+            orient="vertical",
+            command=self.overview_log_tree.yview,
+            style="Overview.Vertical.TScrollbar",
+        )
         self.overview_log_tree.configure(yscrollcommand=overview_scroll.set)
         self.overview_log_tree.grid(row=1, column=0, sticky="nsew")
-        overview_scroll.grid(row=1, column=1, sticky="ns")
+        overview_scroll.grid(row=1, column=1, sticky="ns", padx=(8, 0))
         self.overview_log_tree.bind("<ButtonPress-1>", self._on_overview_log_header_press)
         self.overview_log_tree.bind("<B1-Motion>", self._on_overview_log_header_drag)
         self.overview_log_tree.bind("<ButtonRelease-1>", self._on_overview_log_header_release)
@@ -586,7 +610,7 @@ class CHFSApplication(tk.Tk):
             wrap="word",
             undo=True,
             width=1,
-            height=7,
+            height=9,
             bg=SURFACE_ALT,
             fg=TEXT,
             insertbackground=ACCENT,
@@ -597,18 +621,24 @@ class CHFSApplication(tk.Tk):
             pady=9,
             font=("Microsoft YaHei UI", 10),
         )
-        scrollbar = ttk.Scrollbar(editor, orient="vertical", command=self.shared_text_widget.yview)
+        scrollbar = ttk.Scrollbar(
+            editor,
+            orient="vertical",
+            command=self.shared_text_widget.yview,
+            style="Overview.Vertical.TScrollbar",
+        )
         self.shared_text_widget.configure(yscrollcommand=scrollbar.set)
         self.shared_text_widget.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(8, 0))
         self._shared_text_loading = False
         self._shared_text_dirty = False
         self.shared_text_widget.edit_modified(False)
         self.shared_text_widget.bind("<<Modified>>", self._on_shared_text_changed)
 
-        # 工具条悬浮在文本框右下角，不再额外占用概览页的纵向空间。
-        actions = ttk.Frame(editor, style="Overlay.TFrame", padding=3)
-        actions.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
+        # 工具条直接挂在文本控件内部。其右边界以文本区为准，不再把旁边的
+        # 滚动条算入定位范围，因此放大滚动条后两者仍有独立的点击区域。
+        actions = ttk.Frame(self.shared_text_widget, style="Overlay.TFrame", padding=3)
+        actions.place(relx=1.0, rely=1.0, anchor="se", x=-12, y=-12)
         ttk.Button(actions, text="复制", width=6, style="Compact.TButton", command=self._copy_shared_text).pack(side="left")
         ttk.Button(actions, text="粘贴", width=6, style="Compact.TButton", command=self._paste_shared_text).pack(side="left", padx=(6, 0))
         ttk.Button(actions, text="清空", width=6, style="Compact.TButton", command=self._clear_shared_text).pack(side="left", padx=(6, 0))
