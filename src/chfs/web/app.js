@@ -26,6 +26,9 @@ const elements = {
   folderDialog: document.querySelector("#folderDialog"),
   folderForm: document.querySelector("#folderForm"),
   folderError: document.querySelector("#folderError"),
+  uploadConflictDialog: document.querySelector("#uploadConflictDialog"),
+  uploadConflictPath: document.querySelector("#uploadConflictPath"),
+  applyConflictChoice: document.querySelector("#applyConflictChoice"),
   filePicker: document.querySelector("#filePicker"),
   dropZone: document.querySelector("#dropZone"),
   tray: document.querySelector("#uploadTray"),
@@ -64,6 +67,7 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const error = new Error(payload?.error?.message || `请求失败（${response.status}）`);
     error.code = payload?.error?.code;
+    error.status = response.status;
     throw error;
   }
   return payload;
@@ -378,15 +382,45 @@ async function uploadFiles(files, pathForFile = file => file.name) {
   };
   // 显示底部上传状态面板。
   elements.tray.hidden = false;
+  // 仅在用户勾选“后续同名文件也这样处理”后保存批次级策略。
+  let conflictPolicy = null;
+  let uploadedCount = 0;
+  let skippedCount = 0;
   // 逐个遍历用户选择的文件；这里的 await 使多个文件也是串行上传。
   for (const [index, file] of files.entries()) {
     // 普通上传使用文件名；文件夹上传传入带目录层级的相对路径。
     const path = joinPath(pathForFile(file));
-    // 等待当前文件上传完成后才会进入下一个文件。
-    try { await uploadOne(file, path, batch, index); }
-    // 任一文件失败就提示错误、隐藏面板并终止整个批次。
-    catch (error) { toast(`${file.name}：${error.message}`, true); elements.tray.hidden = true; return; }
-    // 当前文件完整提交后，才把它计入批次已完成字节数。
+    let overwrite = false;
+    let finished = false;
+    while (!finished) {
+      try {
+        // 等待当前文件上传完成后才会进入下一个文件。
+        await uploadOne(file, path, batch, index, overwrite);
+        uploadedCount += 1;
+        finished = true;
+      } catch (error) {
+        // 只有明确的“目标文件已存在”才进入覆盖/跳过流程；其他冲突仍按错误处理。
+        if (!overwrite && isExistingFileConflict(error)) {
+          const choice = conflictPolicy
+            ? { action: conflictPolicy, applyToRemaining: true }
+            : await chooseUploadConflict(path);
+          if (choice.applyToRemaining) conflictPolicy = choice.action;
+          if (choice.action === "skip") {
+            skippedCount += 1;
+            updateUploadDisplay(batch, file, index, file.size, "已跳过同名文件");
+            finished = true;
+          } else {
+            overwrite = true;
+          }
+          continue;
+        }
+        toast(`${file.name}：${error.message}`, true);
+        elements.tray.hidden = true;
+        await loadFiles();
+        return;
+      }
+    }
+    // 上传成功或主动跳过都表示这个文件已经处理完，可继续推进批次总进度。
     batch.completedBytes += file.size;
   }
   // 用最后一个文件刷新一次界面，确保进度显示为“上传完成”。
@@ -396,9 +430,32 @@ async function uploadFiles(files, pathForFile = file => file.name) {
   // 隐藏上传状态面板。
   elements.tray.hidden = true;
   // 弹出整个批次的成功提示。
-  toast(`已上传 ${files.length} 个文件`);
+  const summary = skippedCount
+    ? `已上传 ${uploadedCount} 个，跳过 ${skippedCount} 个`
+    : `已上传 ${uploadedCount} 个文件`;
+  toast(summary);
   // 重新读取服务端目录，让新上传的文件出现在文件列表中。
   await loadFiles();
+}
+
+function isExistingFileConflict(error) {
+  return error?.status === 409 && error?.code === "conflict" && error?.message === "目标文件已存在";
+}
+
+function chooseUploadConflict(path) {
+  return new Promise(resolve => {
+    const dialog = elements.uploadConflictDialog;
+    elements.uploadConflictPath.textContent = `“${path}”已经存在，要覆盖还是跳过？`;
+    elements.applyConflictChoice.checked = false;
+    dialog.returnValue = "skip";
+    dialog.addEventListener("close", () => {
+      resolve({
+        action: dialog.returnValue === "overwrite" ? "overwrite" : "skip",
+        applyToRemaining: elements.applyConflictChoice.checked,
+      });
+    }, { once: true });
+    dialog.showModal();
+  });
 }
 
 function folderRelativePath(file) {
@@ -448,11 +505,16 @@ async function uploadFolder(files) {
     // 在修改服务端状态前先验证全部文件路径，避免无效文件夹留下半成品目录。
     const plan = folderUploadPlan(files);
     for (const directory of plan.directories) {
-      await api("/api/v1/directories", {
-        method: "POST",
-        json: true,
-        body: JSON.stringify({ path: joinPath(directory) }),
-      });
+      try {
+        await api("/api/v1/directories", {
+          method: "POST",
+          json: true,
+          body: JSON.stringify({ path: joinPath(directory) }),
+        });
+      } catch (error) {
+        // 文件夹上传允许合并进已有目录；若冲突原因不是目录已存在，仍应停止。
+        if (!(error?.status === 409 && error?.code === "conflict" && error?.message === "目标已存在")) throw error;
+      }
     }
     await uploadFiles(files, file => plan.paths.get(file));
   } catch (error) {
@@ -461,7 +523,7 @@ async function uploadFolder(files) {
   }
 }
 
-async function uploadOne(file, path, batch, index) {
+async function uploadOne(file, path, batch, index, overwrite = false) {
   // 初始化当前文件的上传状态显示。
   updateUploadDisplay(batch, file, index, 0, "准备上传");
 
@@ -482,8 +544,8 @@ async function uploadOne(file, path, batch, index) {
     method: "POST",
     // 告诉 api() 请求体和响应体都按 JSON 处理。
     json: true,
-    // 声明目标路径、文件总大小、续传标识，并禁止静默覆盖同名文件。
-    body: JSON.stringify({ path, size: file.size, resume_key: resumeKey, overwrite: false }),
+    // 默认禁止静默覆盖；只有用户在冲突对话框中明确选择覆盖时才传 true。
+    body: JSON.stringify({ path, size: file.size, resume_key: resumeKey, overwrite }),
   });
   // 分块大小由服务端决定；大块可减少高速局域网中的请求确认空档。
   const chunkSize = session.chunk_size;

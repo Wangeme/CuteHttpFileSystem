@@ -160,6 +160,10 @@ class ResumableUploadManager:
                 # 同一续传标识只能对应同一路径、同一文件大小，防止串文件。
                 if existing.target != target or existing.expected_size != expected_size:
                     raise ResourceConflictError("续传标识已用于其他文件")
+                # 目标可能在上传期间被另一个请求创建。用户随后明确选择“覆盖”时，
+                # 应升级原会话的策略，使已经传完的临时文件可以直接重新提交。
+                if overwrite:
+                    existing.overwrite = True
                 # 刷新活跃时间，避免正在恢复的会话被过期清理。
                 existing.updated_at = time.time()
                 # 返回旧会话；其中 offset 告诉客户端应从哪里继续发送。

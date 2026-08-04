@@ -80,6 +80,10 @@ tr:hover td { background: rgba(34, 49, 69, .55); }
 .close-button { border: 0; background: transparent; color: var(--muted); font-size: 12px; }
 .dialog label { display: grid; gap: 7px; margin-bottom: 16px; color: #c9d5e1; font-size: 13px; }
 .dialog input { width: 100%; height: 45px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: #101824; color: var(--text); }
+.dialog .dialog-checkbox { display: flex; grid-template-columns: none; align-items: center; gap: 10px; margin: 20px 0; cursor: pointer; }
+.dialog .dialog-checkbox input { width: 18px; height: 18px; margin: 0; padding: 0; accent-color: var(--accent); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.conflict-path { overflow-wrap: anywhere; color: var(--muted); }
 .form-error { min-height: 20px; margin-bottom: 10px; color: var(--danger); font-size: 12px; }
 .upload-tray { position: fixed; right: 24px; bottom: 24px; width: min(380px, calc(100% - 48px)); padding: 17px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-raised); box-shadow: var(--shadow); }
 .upload-tray .upload-heading, .upload-tray .upload-meta, .upload-tray .upload-overall { display: flex; justify-content: space-between; gap: 16px; }

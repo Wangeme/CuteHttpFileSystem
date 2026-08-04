@@ -96,6 +96,24 @@
     </form>
   </dialog>
 
+  <dialog id="uploadConflictDialog" class="dialog">
+    <form id="uploadConflictForm" method="dialog">
+      <div class="dialog-heading">
+        <div><p class="eyebrow">上传冲突</p><h2>文件已存在</h2></div>
+        <button class="close-button" value="skip" aria-label="关闭并跳过" type="submit">关闭</button>
+      </div>
+      <p id="uploadConflictPath" class="conflict-path"></p>
+      <label class="dialog-checkbox">
+        <input id="applyConflictChoice" type="checkbox">
+        <span>后续同名文件也这样处理</span>
+      </label>
+      <div class="dialog-actions">
+        <button class="button button-secondary" value="skip" type="submit">跳过</button>
+        <button class="button button-primary" value="overwrite" type="submit">覆盖</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="uploadTray" class="upload-tray" hidden>
     <div class="upload-heading"><strong id="uploadTitle">正在上传</strong><span id="uploadCounter">1 / 1</span></div>
     <div class="upload-meta"><span id="uploadDetail"></span><span id="uploadSpeed">0 B/s</span></div>

@@ -76,6 +76,34 @@ class ResumableUploadManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(self.root.glob(".chfs-resume-*")), [])
         self.assertEqual(self.manager.snapshots(), [])
 
+    async def test_resumed_session_can_be_upgraded_to_overwrite(self) -> None:
+        """上传期间出现同名文件后，用户明确选择覆盖应能复用已上传的数据。"""
+
+        content = b"new-content"
+        session = self.manager.create(self.principal, "same.bin", len(content), "resume-overwrite")
+        await self.manager.append(
+            self.principal,
+            session.upload_id,
+            0,
+            None,
+            bytes_chunks([content]),
+        )
+        (self.root / "same.bin").write_bytes(b"old-content")
+
+        with self.assertRaisesRegex(ResourceConflictError, "目标文件已存在"):
+            self.manager.complete(self.principal, session.upload_id, None)
+
+        resumed = self.manager.create(
+            self.principal,
+            "same.bin",
+            len(content),
+            "resume-overwrite",
+            overwrite=True,
+        )
+        self.assertEqual(resumed.upload_id, session.upload_id)
+        self.manager.complete(self.principal, session.upload_id, None)
+        self.assertEqual((self.root / "same.bin").read_bytes(), content)
+
     async def test_limit_and_cancel_cleanup(self) -> None:
         with self.assertRaises(UploadTooLargeError):
             self.manager.create(self.principal, "too-large.bin", 65 * 1024 * 1024, "resume-large")
