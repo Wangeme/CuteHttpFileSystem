@@ -131,6 +131,78 @@ class FileService:
         except OSError as exc:
             raise ResourceConflictError("删除失败；目录可能非空或文件正在使用") from exc
 
+    def copy_or_move(
+        self,
+        principal: Principal,
+        source_paths: list[str],
+        destination_path: str,
+        *,
+        move: bool = False,
+    ) -> list[FileEntry]:
+        """把多个文件或目录复制/移动到同一目标目录。
+
+        执行前先完成全部路径和冲突检查，避免明显错误造成只处理了一半的批次。
+        """
+
+        require(principal, Permission.READ)
+        require(principal, Permission.WRITE)
+        if move:
+            require(principal, Permission.DELETE)
+        if not source_paths:
+            raise ResourceConflictError("没有选择要处理的文件")
+
+        destination = self.resolver.resolve(destination_path)
+        if not destination.exists() or not destination.is_dir():
+            raise ResourceNotFoundError("目标目录不存在")
+
+        planned: list[tuple[Path, Path]] = []
+        target_keys: set[str] = set()
+        for source_path in source_paths:
+            source = self.resolver.resolve(source_path)
+            if not source.exists():
+                raise ResourceNotFoundError(f"源文件不存在：{source_path}")
+            if self.resolver.is_root(source):
+                raise ResourceConflictError("不能复制或移动根目录")
+            target = destination / source.name
+            key = os.path.normcase(str(target))
+            if key in target_keys:
+                raise ResourceConflictError(f"多个源项目具有相同名称：{source.name}")
+            target_keys.add(key)
+            if target.exists():
+                raise ResourceConflictError(f"目标已存在：{source.name}")
+            if source.is_dir():
+                try:
+                    destination.relative_to(source)
+                except ValueError:
+                    pass
+                else:
+                    raise ResourceConflictError("不能把文件夹复制或移动到其自身内部")
+            planned.append((source, target))
+
+        results: list[FileEntry] = []
+        for source, target in planned:
+            try:
+                if move:
+                    shutil.move(str(source), str(target))
+                elif source.is_dir():
+                    shutil.copytree(source, target, copy_function=shutil.copy2)
+                else:
+                    shutil.copy2(source, target)
+            except OSError as exc:
+                action = "移动" if move else "复制"
+                raise ResourceConflictError(f"{action}失败：{source.name}") from exc
+            stat = target.stat()
+            results.append(
+                FileEntry(
+                    target.name,
+                    self.resolver.relative(target),
+                    target.is_dir(),
+                    0 if target.is_dir() else stat.st_size,
+                    stat.st_mtime_ns,
+                )
+            )
+        return results
+
 
 async def bytes_chunks(parts: Iterable[bytes]) -> AsyncIterable[bytes]:
     """测试与非 HTTP 适配器可使用的异步字节流辅助函数。"""

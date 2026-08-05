@@ -24,7 +24,7 @@ button { cursor: pointer; }
 .brand strong, .brand small { display: block; }
 .brand strong { font-size: 16px; letter-spacing: .06em; }
 .brand small { margin-top: 1px; color: var(--muted); font-size: 11px; }
-.session-area, .primary-actions, .file-toolbar { display: flex; align-items: center; gap: 10px; }
+.session-area, .primary-actions, .file-toolbar, .file-toolbar-status, .file-commands { display: flex; align-items: center; gap: 10px; }
 .connection { color: var(--muted); font-size: 13px; }
 .status-dot { display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px rgba(45, 212, 191, .12); }
 .workspace { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 54px 0 80px; }
@@ -58,14 +58,23 @@ h2 { margin-bottom: 0; font-size: 24px; }
 .text-meta span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-panel { overflow: hidden; min-height: 410px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
 .file-panel.dragging { border-color: var(--accent); box-shadow: inset 0 0 0 2px rgba(45, 212, 191, .25), var(--shadow); }
+.location-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 18px; min-height: 52px; padding: 8px 20px; border-bottom: 1px solid var(--border); background: #111a26; }
+.space-switch { display: flex; flex-wrap: wrap; gap: 8px; }
+.quick-access, .quick-access-buttons { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.quick-access > span { color: var(--muted); font-size: 12px; }
+.location-button { min-height: 34px; padding: 0 13px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--muted); }
+.location-button:hover, .location-button.active { border-color: #3b827b; background: rgba(45, 212, 191, .1); color: var(--accent); }
 .file-toolbar { justify-content: space-between; min-height: 62px; padding: 0 20px; border-bottom: 1px solid var(--border); }
+.file-commands { flex-wrap: wrap; }
 .item-count { color: var(--muted); font-size: 13px; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
 th { height: 45px; padding: 0 20px; color: var(--muted); font-size: 11px; font-weight: 600; text-align: left; letter-spacing: .05em; }
-th:nth-child(2) { width: 130px; } th:nth-child(3) { width: 190px; } th:last-child { width: 150px; }
+th:nth-child(3) { width: 130px; } th:nth-child(4) { width: 190px; } th:last-child { width: 150px; }
 td { height: 65px; padding: 0 20px; border-top: 1px solid rgba(44, 59, 79, .72); color: #cfd9e3; font-size: 14px; }
 tr:hover td { background: rgba(34, 49, 69, .55); }
+.selection-column { width: 48px; padding-right: 0; }
+.selection-column input { width: 17px; height: 17px; accent-color: var(--accent); }
 .file-name { display: flex; align-items: center; gap: 12px; min-width: 220px; }
 .file-type { flex: 0 0 auto; width: 32px; height: 32px; padding: 5px; border: 1px solid var(--border); border-radius: 8px; background: #111a26; image-rendering: pixelated; image-rendering: crisp-edges; }
 .name-button { overflow: hidden; appearance: none; max-width: 520px; padding: 8px 0; border: 0; background: transparent; color: var(--text); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
@@ -108,7 +117,13 @@ progress { width: 100%; height: 6px; border: 0; accent-color: var(--accent); }
   .text-actions { width: 100%; }
   .text-actions .button { flex: 1; padding-inline: 8px; }
   .text-panel textarea { min-height: 180px; }
-  th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { display: none; }
+  .location-toolbar { align-items: flex-start; flex-direction: column; padding-inline: 14px; }
+  .quick-access { width: 100%; }
+  .file-toolbar { align-items: flex-start; flex-direction: column; padding: 10px 14px; }
+  .file-commands { width: 100%; gap: 5px; }
+  .file-commands .button { flex: 1; min-width: 58px; padding-inline: 5px; font-size: 14px; white-space: nowrap; }
+  .file-toolbar-status { width: 100%; justify-content: space-between; }
+  th:nth-child(3), td:nth-child(3), th:nth-child(4), td:nth-child(4) { display: none; }
   th, td { padding-inline: 14px; }
   th:last-child { width: 124px; }
   .name-button { max-width: calc(100vw - 220px); }

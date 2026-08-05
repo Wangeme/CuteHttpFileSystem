@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ from .security import Account, verify_password
 
 
 WINDOWS_DOWNLOADS_FOLDER_ID = "{374DE290-123F-4565-9164-39C4925E467B}"
+WINDOWS_DOCUMENTS_FOLDER_NAME = "Personal"
 
 
 def default_config_path() -> Path:
@@ -28,8 +30,8 @@ def default_config_path() -> Path:
     return Path.home() / ".config" / "chfs" / "config.json"
 
 
-def default_downloads_directory() -> Path:
-    """读取当前用户的下载目录，兼容 Windows 目录重定向。"""
+def _windows_user_shell_folder(value_name: str) -> Path | None:
+    """读取 Windows 用户目录注册表值，兼容 OneDrive 等目录重定向。"""
 
     if os.name == "nt":
         try:
@@ -37,12 +39,30 @@ def default_downloads_directory() -> Path:
 
             key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
-                value, _kind = winreg.QueryValueEx(key, WINDOWS_DOWNLOADS_FOLDER_ID)
+                value, _kind = winreg.QueryValueEx(key, value_name)
             if isinstance(value, str) and value.strip():
                 return Path(os.path.expandvars(value)).expanduser()
         except (ImportError, OSError):
             pass
+    return None
+
+
+def default_downloads_directory() -> Path:
+    """读取当前用户的下载目录，兼容 Windows 目录重定向。"""
+
+    redirected = _windows_user_shell_folder(WINDOWS_DOWNLOADS_FOLDER_ID)
+    if redirected is not None:
+        return redirected
     return Path.home() / "Downloads"
+
+
+def default_documents_directory() -> Path:
+    """读取当前用户的文档目录，兼容 Windows 目录重定向。"""
+
+    redirected = _windows_user_shell_folder(WINDOWS_DOCUMENTS_FOLDER_NAME)
+    if redirected is not None:
+        return redirected
+    return Path.home() / "Documents"
 
 
 def default_share_root() -> Path:
@@ -70,6 +90,7 @@ class AppConfig:
     deny_networks: tuple[str, ...] = ()
     accounts: tuple[Account, ...] = ()
     full_disk_access: bool = False
+    trusted_full_disk_macs: tuple[str, ...] = ()
 
     @classmethod
     def load(cls, config_path: Path) -> "AppConfig":
@@ -119,6 +140,7 @@ class AppConfig:
                 for item in self.accounts
             ],
             "full_disk_access": self.full_disk_access,
+            "trusted_full_disk_macs": list(self.trusted_full_disk_macs),
         }
 
     def save(self, config_path: Path) -> None:
@@ -163,6 +185,7 @@ class AppConfig:
             "deny_networks",
             "accounts",
             "full_disk_access",
+            "trusted_full_disk_macs",
         }
         unknown = sorted(set(data) - allowed_keys)
         if unknown:
@@ -198,6 +221,10 @@ class AppConfig:
         full_disk_access = data.get("full_disk_access", False)
         if not isinstance(full_disk_access, bool):
             raise InvalidConfigurationError("full_disk_access 必须是布尔值")
+        trusted_full_disk_macs = _mac_addresses(
+            data.get("trusted_full_disk_macs", []),
+            "trusted_full_disk_macs",
+        )
         usernames = [item.username for item in accounts]
         if len(usernames) != len(set(usernames)):
             raise InvalidConfigurationError("账户用户名不能重复")
@@ -215,6 +242,7 @@ class AppConfig:
             deny_networks=deny,
             accounts=accounts,
             full_disk_access=full_disk_access,
+            trusted_full_disk_macs=trusted_full_disk_macs,
         )
 
 
@@ -284,4 +312,20 @@ def _accounts(value: Any) -> tuple[Account, ...]:
         verify_password("configuration-format-check", password_hash)
         permissions = _permissions(item["permissions"], f"accounts[{index}].permissions")
         result.append(Account(username, password_hash, permissions))
+    return tuple(result)
+
+
+def _mac_addresses(value: Any, name: str) -> tuple[str, ...]:
+    """校验并规范化设备 MAC 地址，统一保存为 AA-BB-CC-DD-EE-FF。"""
+
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise InvalidConfigurationError(f"{name} 必须是 MAC 地址字符串数组")
+    result: list[str] = []
+    for item in value:
+        compact = re.sub(r"[:-]", "", item.strip()).upper()
+        if not re.fullmatch(r"[0-9A-F]{12}", compact):
+            raise InvalidConfigurationError(f"{name} 包含无效 MAC 地址：{item}")
+        normalized = "-".join(compact[index:index + 2] for index in range(0, 12, 2))
+        if normalized not in result:
+            result.append(normalized)
     return tuple(result)

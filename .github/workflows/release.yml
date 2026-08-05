@@ -4,10 +4,8 @@ on:
   # Pull Request 和手动运行只负责验证构建，不会创建 Release。
   pull_request:
   workflow_dispatch:
-  push:
-    tags:
-      # 仅正式版本标签触发，例如 v0.1.0、v1.2.3。
-      - "v[0-9]+.[0-9]+.[0-9]+"
+  # 正式版本由维护者在本地构建并通过 gh release create 上传，避免标签推送
+  # 自动占用 GitHub Actions；这里仍保留手动构建和 PR 验证能力。
 
 # 创建 GitHub Release 和上传附件需要仓库内容写权限。
 permissions:

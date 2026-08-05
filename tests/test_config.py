@@ -36,6 +36,21 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(config.allow_networks, ("192.168.1.0/24",))
         self.assertEqual(config.guest_permissions, frozenset({Permission.READ}))
 
+    def test_trusted_full_disk_macs_are_normalized(self) -> None:
+        config = AppConfig.from_dict(
+            {
+                "share_root": "data",
+                "trusted_full_disk_macs": ["2a:d1:fb:e0:97:08", "2A-D1-FB-E0-97-08"],
+            },
+            base_dir=Path.cwd(),
+        )
+        self.assertEqual(config.trusted_full_disk_macs, ("2A-D1-FB-E0-97-08",))
+        with self.assertRaises(InvalidConfigurationError):
+            AppConfig.from_dict(
+                {"share_root": "data", "trusted_full_disk_macs": ["not-a-mac"]},
+                base_dir=Path.cwd(),
+            )
+
     def test_unknown_key_and_boolean_port_are_rejected(self) -> None:
         with self.assertRaises(InvalidConfigurationError):
             AppConfig.from_dict({"share_root": "data", "typo": 1}, base_dir=Path.cwd())

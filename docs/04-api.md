@@ -9,14 +9,15 @@
 | GET | `/api/v1/session` | 无 | 返回当前访客或令牌主体与权限。 |
 | POST | `/api/v1/session` | 无 | JSON：`username`、`password`。 |
 | DELETE | `/api/v1/session` | 登录 | 注销当前令牌。 |
-| GET | `/api/v1/files?path=` | read | 列出目录。 |
-| GET | `/api/v1/content?path=` | read | 下载文件。 |
-| PUT | `/api/v1/content?path=&overwrite=false` | write | 请求体为原始文件字节。 |
+| GET | `/api/v1/files?space=shared&path=` | read | 列出目录；受信任设备可使用 `space=computer`。 |
+| GET | `/api/v1/content?space=shared&path=` | read | 下载文件。 |
+| PUT | `/api/v1/content?space=shared&path=&overwrite=false` | write | 请求体为原始文件字节。 |
 | POST | `/api/v1/uploads` | write | 创建或按恢复键恢复分块上传会话。 |
 | PATCH | `/api/v1/uploads/{upload_id}?offset=` | write | 按精确偏移追加分块；可携带严格校验摘要。 |
 | POST | `/api/v1/uploads/{upload_id}/complete` | write | 校验总长度、同步写盘并原子提交。 |
 | DELETE | `/api/v1/uploads/{upload_id}` | write | 取消上传并清理临时文件。 |
 | POST | `/api/v1/directories` | write | JSON：`path`。 |
+| POST | `/api/v1/file-operations` | read+write | JSON：`space`、`operation`、`sources`、`destination`；移动还需 delete。 |
 | DELETE | `/api/v1/files?path=&recursive=false` | delete | 删除文件或目录。 |
 
 错误响应格式：

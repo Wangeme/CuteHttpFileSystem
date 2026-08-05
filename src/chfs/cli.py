@@ -45,10 +45,14 @@ def main(argv: list[str] | None = None) -> int:
             print(hash_password(password))
             return 0
         config = AppConfig.load(args.config)
-        if not config.full_disk_access:
-            config.share_root.mkdir(parents=True, exist_ok=True)
+        # 共享目录始终存在；全盘能力只是浏览器中的附加“此电脑”入口。
+        config.share_root.mkdir(parents=True, exist_ok=True)
         if args.command == "check-config":
-            target = "本机所有可访问磁盘" if config.full_disk_access else str(config.share_root)
+            target = str(config.share_root)
+            if config.full_disk_access:
+                target += "（附加全部访客“此电脑”访问）"
+            elif config.trusted_full_disk_macs:
+                target += f"（附加 {len(config.trusted_full_disk_macs)} 个受信任设备的“此电脑”访问）"
             print(f"配置有效，共享范围：{target}")
             return 0
         uvicorn.run(

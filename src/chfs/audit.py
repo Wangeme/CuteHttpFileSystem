@@ -59,13 +59,19 @@ class AuditLogger:
         self._lock = Lock()
         self._mac_cache: dict[str, str] = {}
 
-    def record(self, action: str, *, actor: str, source: str, success: bool, **details: Any) -> None:
-        if self._path is None:
-            return
+    def source_mac(self, source: str) -> str:
+        """返回缓存后的来源 MAC，供审计和本地可信设备策略共用。"""
+
         mac = self._mac_cache.get(source)
         if mac is None:
             mac = resolve_mac_address(source)
             self._mac_cache[source] = mac
+        return mac
+
+    def record(self, action: str, *, actor: str, source: str, success: bool, **details: Any) -> None:
+        if self._path is None:
+            return
+        mac = self.source_mac(source)
         event = {
             "timestamp": datetime.now(UTC).isoformat(),
             "action": action,

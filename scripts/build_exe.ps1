@@ -73,7 +73,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Installing or updating build dependencies..." -ForegroundColor Cyan
-& $venvPython -m pip install --disable-pip-version-check -e $projectRoot pyinstaller
+# 固定已在 Windows 11 / Python 3.13 验证过的打包器版本，避免发布构建随
+# PyInstaller 最新版本变化而产生不可复现的启动差异。
+& $venvPython -m pip install --disable-pip-version-check -e $projectRoot "pyinstaller==6.16.0"
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to install build dependencies. Check the network connection."
 }

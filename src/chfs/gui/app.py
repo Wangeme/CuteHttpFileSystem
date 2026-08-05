@@ -34,6 +34,7 @@ if os.name == "nt":
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from .. import __version__
 from ..config import AppConfig, default_config_path, default_share_root
 from ..errors import CHFSError
 from ..models import Permission
@@ -279,7 +280,7 @@ class CHFSApplication(tk.Tk):
             button = ttk.Button(sidebar, text=label, style="Nav.TButton", command=lambda page=key: self.show_page(page))
             button.pack(fill="x", padx=10, pady=2)
             self.nav_buttons[key] = button
-        ttk.Label(sidebar, text="CHFS v0.1.0\n安全 · 稳定 · 高效", style="Muted.TLabel", background=SIDEBAR, justify="left").pack(side="bottom", anchor="w", padx=18, pady=20)
+        ttk.Label(sidebar, text=f"CHFS v{__version__}\n安全 · 稳定 · 高效", style="Muted.TLabel", background=SIDEBAR, justify="left").pack(side="bottom", anchor="w", padx=18, pady=20)
 
         self.content = ttk.Frame(self, padding=(22, 18))
         self.content.grid(row=0, column=1, sticky="nsew")
@@ -442,7 +443,7 @@ class CHFSApplication(tk.Tk):
         ttk.Label(service_header, text="服务概览", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
         ttk.Button(
             service_header,
-            text="打开此电脑" if self.full_disk_var.get() else "打开目录",
+            text="打开目录",
             width=9,
             style="Compact.TButton",
             command=self._open_share_location,
@@ -454,11 +455,16 @@ class CHFSApplication(tk.Tk):
             style="Compact.TButton" if self.full_disk_var.get() else "CompactDanger.TButton",
             command=self._toggle_full_disk_access,
         ).pack(side="right", padx=(0, 8))
-        root_name = "本机所有可用磁盘" if self.full_disk_var.get() else (Path(self.root_var.get()).name or self.root_var.get())
+        root_name = Path(self.root_var.get()).name or self.root_var.get()
+        computer_access = "全部访客" if self.full_disk_var.get() else (
+            f"{len(self.config.trusted_full_disk_macs)} 个受信任设备"
+            if self.config.trusted_full_disk_macs else "关闭"
+        )
         service_rows = (
             ("服务名称", "CHFS 文件传输服务"),
             ("监听端口", self.port_var.get()),
             ("根目录", root_name),
+            ("此电脑映射", computer_access),
             ("访客权限", self._guest_summary()),
             ("账户", f"{len(self.accounts)} 个"),
         )
@@ -971,6 +977,8 @@ class CHFSApplication(tk.Tk):
                 for item in self.accounts
             ],
             "full_disk_access": self.full_disk_var.get(),
+            # 可信设备 MAC 暂不在 GUI 中编辑，但保存其他设置时必须原样保留。
+            "trusted_full_disk_macs": list(self.config.trusted_full_disk_macs),
         }
         return AppConfig.from_dict(document, base_dir=self.config_path.parent)
 
@@ -1225,10 +1233,6 @@ class CHFSApplication(tk.Tk):
         """使用系统文件管理器打开当前实际共享位置。"""
 
         try:
-            if self.full_disk_var.get():
-                # 全盘模式没有唯一共享目录，因此打开“此电脑”。
-                subprocess.Popen(["explorer.exe", "shell:MyComputerFolder"])
-                return
             path = Path(self.root_var.get()).expanduser().resolve()
             path.mkdir(parents=True, exist_ok=True)
             if os.name == "nt":

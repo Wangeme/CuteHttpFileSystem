@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 import uvicorn
 
@@ -34,6 +35,7 @@ class HttpIntegrationTests(unittest.TestCase):
             {
                 "share_root": "shared",
                 "audit_log": "audit.jsonl",
+                "trusted_full_disk_macs": ["2A-D1-FB-E0-97-08"],
                 "guest_permissions": ["read"],
                 "max_upload_bytes": 32,
                 "accounts": [
@@ -110,6 +112,10 @@ class HttpIntegrationTests(unittest.TestCase):
         self.assertIn('id="uploadFolderButton"', html)
         self.assertIn('id="uploadConflictDialog"', html)
         self.assertIn('id="applyConflictChoice"', html)
+        self.assertIn('id="computerSpaceButton"', html)
+        self.assertIn('id="quickAccess"', html)
+        self.assertIn('id="parentButton"', html)
+        self.assertIn('id="pasteFilesButton"', html)
         self.assertIn('id="uploadSpeed"', html)
         self.assertIn('id="uploadOverallProgress"', html)
         self.assertIn('id="sharedText"', html)
@@ -123,6 +129,8 @@ class HttpIntegrationTests(unittest.TestCase):
         self.assertIn(b"folderUploadPlan", body)
         self.assertIn(b"chooseUploadConflict", body)
         self.assertIn(b"isExistingFileConflict", body)
+        self.assertIn(b"switchSpace", body)
+        self.assertIn(b"pasteFiles", body)
         self.assertIn(b"webkitRelativePath", body)
         self.assertIn(b"createPixelIcon", body)
         self.assertIn(b"xhr.send(body)", body)
@@ -139,6 +147,31 @@ class HttpIntegrationTests(unittest.TestCase):
         self.assertEqual(principal["name"], "guest")
         self.assertEqual(principal["permissions"], ["read"])
         self.assertTrue(json.loads(body)["authentication_available"])
+        self.assertFalse(json.loads(body)["computer_access"])
+
+    def test_trusted_mac_exposes_computer_space(self) -> None:
+        runtime = self.application.state.runtime
+        runtime.audit._mac_cache["127.0.0.1"] = "2A-D1-FB-E0-97-08"
+        try:
+            downloads = self.base / "Downloads"
+            documents = self.base / "Documents"
+            downloads.mkdir(exist_ok=True)
+            documents.mkdir(exist_ok=True)
+            with patch("chfs.http.default_downloads_directory", return_value=downloads), patch(
+                "chfs.http.default_documents_directory", return_value=documents
+            ):
+                status, body, _ = self.request("GET", "/api/v1/session")
+            self.assertEqual(status, 200)
+            self.assertTrue(json.loads(body)["computer_access"])
+            quick_access = json.loads(body)["computer_quick_access"]
+            self.assertEqual([item["label"] for item in quick_access], ["下载", "文档"])
+            self.assertTrue(all(set(item) == {"label", "path"} for item in quick_access))
+            status, body, _ = self.request("GET", "/api/v1/files?space=computer&path=")
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["space"], "computer")
+            self.assertTrue(json.loads(body)["entries"])
+        finally:
+            runtime.audit._mac_cache["127.0.0.1"] = "本机"
 
     def test_guest_can_read_but_cannot_upload(self) -> None:
         status, body, _ = self.request("GET", "/api/v1/files?path=")
@@ -213,6 +246,35 @@ class HttpIntegrationTests(unittest.TestCase):
         status, body, _ = self.request("GET", f"/api/v1/content?path={encoded_path}", token=token)
         self.assertEqual(status, 200)
         self.assertEqual(body.decode(), "你好，CHFS")
+
+        # 浏览器文件管理器的复制/粘贴走服务端操作，不需要把文件先下载到客户端。
+        status, _, _ = self.request(
+            "POST",
+            "/api/v1/directories",
+            body=json.dumps({"path": "副本"}, ensure_ascii=False).encode("utf-8"),
+            token=token,
+            content_type="application/json; charset=utf-8",
+        )
+        self.assertEqual(status, 201)
+        status, body, _ = self.request(
+            "POST",
+            "/api/v1/file-operations",
+            body=json.dumps(
+                {
+                    "space": "shared",
+                    "operation": "copy",
+                    "sources": ["资料/你好.txt"],
+                    "destination": "副本",
+                },
+                ensure_ascii=False,
+            ).encode("utf-8"),
+            token=token,
+            content_type="application/json; charset=utf-8",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["entries"][0]["path"], "副本/你好.txt")
+        self.assertEqual((self.base / "shared" / "副本" / "你好.txt").read_text(encoding="utf-8"), "你好，CHFS")
+
         status, _, _ = self.request("DELETE", f"/api/v1/files?path={encoded_path}", token=token)
         self.assertEqual(status, 204)
         actions = [json.loads(line)["action"] for line in (self.base / "audit.jsonl").read_text(encoding="utf-8").splitlines()]

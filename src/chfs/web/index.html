@@ -58,13 +58,33 @@
       </section>
 
       <section id="dropZone" class="file-panel" aria-live="polite">
+        <div class="location-toolbar">
+          <div class="space-switch" aria-label="文件空间">
+            <button id="sharedSpaceButton" class="location-button active" type="button">共享目录</button>
+            <button id="computerSpaceButton" class="location-button" type="button" hidden>此电脑</button>
+            <button id="homeButton" class="location-button" type="button" hidden>主目录</button>
+          </div>
+          <div id="quickAccess" class="quick-access" aria-label="快速访问" hidden>
+            <span>快速访问</span>
+            <div id="quickAccessButtons" class="quick-access-buttons"></div>
+          </div>
+        </div>
         <div class="file-toolbar">
-          <div id="itemCount" class="item-count">正在读取…</div>
-          <button id="refreshButton" class="button button-quiet" type="button">刷新</button>
+          <div class="file-commands">
+            <button id="parentButton" class="button button-quiet" type="button">上一级</button>
+            <button id="copyFilesButton" class="button button-quiet" type="button" disabled>复制</button>
+            <button id="cutFilesButton" class="button button-quiet" type="button" disabled>剪切</button>
+            <button id="pasteFilesButton" class="button button-quiet" type="button" disabled>粘贴</button>
+            <button id="deleteFilesButton" class="button button-danger" type="button" disabled>删除</button>
+          </div>
+          <div class="file-toolbar-status">
+            <div id="itemCount" class="item-count">正在读取…</div>
+            <button id="refreshButton" class="button button-quiet" type="button">刷新</button>
+          </div>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th><span class="sr-only">操作</span></th></tr></thead>
+            <thead><tr><th class="selection-column"><input id="selectAllFiles" type="checkbox" aria-label="全选"></th><th>名称</th><th>大小</th><th>修改时间</th><th><span class="sr-only">操作</span></th></tr></thead>
             <tbody id="fileRows"></tbody>
           </table>
         </div>

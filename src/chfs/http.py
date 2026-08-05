@@ -15,9 +15,10 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from . import __version__
 from .audit import AuditLogger
-from .config import AppConfig
-from .errors import AuthenticationError, CHFSError, InvalidPathError
+from .config import AppConfig, default_documents_directory, default_downloads_directory
+from .errors import AuthenticationError, CHFSError, InvalidPathError, PermissionDeniedError
 from .models import Principal
 from .paths import FullDiskPathResolver, SafePathResolver
 from .security import NetworkPolicy, SessionManager
@@ -40,6 +41,8 @@ class Runtime:
     uploads: ResumableUploadManager
     transfers: TransferRegistry
     shared_text: SharedTextStore
+    computer_files: FileService | None = None
+    computer_uploads: ResumableUploadManager | None = None
 
 
 class TrackedFileResponse(FileResponse):
@@ -126,7 +129,13 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 def create_app(config: AppConfig) -> Starlette:
     """装配应用依赖；测试和 GUI 都可据此创建独立服务实例。"""
 
-    resolver = FullDiskPathResolver() if config.full_disk_access else SafePathResolver(config.share_root)
+    # 共享目录始终保留；全盘访问作为额外的“此电脑”空间按请求来源开放。
+    resolver = SafePathResolver(config.share_root)
+    computer_resolver = (
+        FullDiskPathResolver()
+        if config.full_disk_access or config.trusted_full_disk_macs
+        else None
+    )
     shared_text_path = (
         config.share_root.parent / f".{config.share_root.name}.chfs-state" / "shared-text.json"
     )
@@ -139,6 +148,16 @@ def create_app(config: AppConfig) -> Starlette:
         uploads=ResumableUploadManager(resolver, config.max_upload_bytes),
         transfers=TransferRegistry(),
         shared_text=SharedTextStore(shared_text_path),
+        computer_files=(
+            FileService(computer_resolver, config.max_upload_bytes)
+            if computer_resolver is not None
+            else None
+        ),
+        computer_uploads=(
+            ResumableUploadManager(computer_resolver, config.max_upload_bytes)
+            if computer_resolver is not None
+            else None
+        ),
     )
     routes = [
         Route("/", web_index, methods=["GET"]),
@@ -148,6 +167,7 @@ def create_app(config: AppConfig) -> Starlette:
         Route("/api/v1/files", list_or_delete_files, methods=["GET", "DELETE"]),
         Route("/api/v1/content", content, methods=["GET", "PUT"]),
         Route("/api/v1/directories", create_directory, methods=["POST"]),
+        Route("/api/v1/file-operations", file_operations, methods=["POST"]),
         Route("/api/v1/shared-text", shared_text, methods=["GET", "PUT"]),
         Route("/api/v1/uploads", create_resumable_upload, methods=["POST"]),
         Route("/api/v1/uploads/{upload_id}", upload_chunk, methods=["PATCH", "DELETE"]),
@@ -167,7 +187,7 @@ async def web_index(request: Request) -> FileResponse:
 
 
 async def health(request: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok", "version": "0.1.0"})
+    return JSONResponse({"status": "ok", "version": __version__})
 
 
 async def session_endpoint(request: Request) -> JSONResponse:
@@ -175,10 +195,14 @@ async def session_endpoint(request: Request) -> JSONResponse:
 
     if request.method == "GET":
         principal = _principal(request)
+        computer_access = _has_computer_access(request)
         return JSONResponse(
             {
                 "principal": _principal_dict(principal),
                 "authentication_available": bool(_runtime(request).config.accounts),
+                "computer_access": computer_access,
+                "computer_home": _computer_home(request) if computer_access else None,
+                "computer_quick_access": _computer_quick_access(request) if computer_access else [],
             }
         )
     runtime = _runtime(request)
@@ -231,16 +255,19 @@ async def delete_session(request: Request) -> Response:
 async def list_or_delete_files(request: Request) -> Response:
     runtime = _runtime(request)
     principal = _principal(request)
+    space = _space_from_query(request)
+    files = _files_for_space(request, space)
     user_path = request.query_params.get("path", "")
     if request.method == "GET":
-        entries = runtime.files.list_directory(principal, user_path)
+        entries = files.list_directory(principal, user_path)
         return JSONResponse(
-            {"path": user_path.replace("\\", "/"), "entries": [item.as_dict() for item in entries]}
+            {"space": space, "path": user_path.replace("\\", "/"), "entries": [item.as_dict() for item in entries]}
         )
     recursive = _boolean_query(request, "recursive", False)
-    runtime.files.delete(principal, user_path, recursive=recursive)
+    files.delete(principal, user_path, recursive=recursive)
     runtime.audit.record(
-        "file.delete", actor=principal.name, source=_source(request), success=True, path=user_path, recursive=recursive
+        "file.delete", actor=principal.name, source=_source(request), success=True,
+        space=space, path=user_path, recursive=recursive
     )
     return Response(status_code=204)
 
@@ -248,6 +275,8 @@ async def list_or_delete_files(request: Request) -> Response:
 async def content(request: Request) -> Response:
     runtime = _runtime(request)
     principal = _principal(request)
+    space = _space_from_query(request)
+    files = _files_for_space(request, space)
     user_path = request.query_params.get("path", "")
     if not user_path:
         raise InvalidPathError("必须提供文件路径")
@@ -258,8 +287,11 @@ async def content(request: Request) -> Response:
             cookie_token = request.cookies.get("chfs_download_session")
             if cookie_token:
                 principal = runtime.sessions.resolve(cookie_token)
-        path = runtime.files.open_download(principal, user_path)
-        runtime.audit.record("file.download", actor=principal.name, source=_source(request), success=True, path=user_path)
+        path = files.open_download(principal, user_path)
+        runtime.audit.record(
+            "file.download", actor=principal.name, source=_source(request), success=True,
+            space=space, path=user_path
+        )
         return TrackedFileResponse(
             path,
             registry=runtime.transfers,
@@ -277,9 +309,10 @@ async def content(request: Request) -> Response:
                 raise UploadTooLargeError("上传文件超过配置上限")
         except ValueError as exc:
             raise InvalidPathError("Content-Length 格式无效") from exc
-    entry = await runtime.files.upload(principal, user_path, request.stream(), overwrite=overwrite)
+    entry = await files.upload(principal, user_path, request.stream(), overwrite=overwrite)
     runtime.audit.record(
-        "file.upload", actor=principal.name, source=_source(request), success=True, path=user_path, size=entry.size
+        "file.upload", actor=principal.name, source=_source(request), success=True,
+        space=space, path=user_path, size=entry.size
     )
     return JSONResponse(entry.as_dict(), status_code=201)
 
@@ -288,12 +321,52 @@ async def create_directory(request: Request) -> JSONResponse:
     runtime = _runtime(request)
     principal = _principal(request)
     payload = await _json_object(request)
+    space = _space_from_payload(payload)
+    files = _files_for_space(request, space)
     user_path = payload.get("path")
     if not isinstance(user_path, str) or not user_path:
         raise InvalidPathError("必须提供目录路径")
-    entry = runtime.files.create_directory(principal, user_path)
-    runtime.audit.record("directory.create", actor=principal.name, source=_source(request), success=True, path=user_path)
+    entry = files.create_directory(principal, user_path)
+    runtime.audit.record(
+        "directory.create", actor=principal.name, source=_source(request), success=True,
+        space=space, path=user_path
+    )
     return JSONResponse(entry.as_dict(), status_code=201)
+
+
+async def file_operations(request: Request) -> JSONResponse:
+    """在同一文件空间内执行服务器端复制或移动。"""
+
+    runtime = _runtime(request)
+    principal = _principal(request)
+    payload = await _json_object(request)
+    space = _space_from_payload(payload)
+    files = _files_for_space(request, space)
+    operation = payload.get("operation")
+    sources = payload.get("sources")
+    destination = payload.get("destination")
+    if operation not in {"copy", "move"}:
+        raise InvalidPathError("operation 必须是 copy 或 move")
+    if not isinstance(sources, list) or not sources or not all(isinstance(item, str) and item for item in sources):
+        raise InvalidPathError("sources 必须是非空路径数组")
+    if not isinstance(destination, str):
+        raise InvalidPathError("destination 必须是目录路径")
+    entries = files.copy_or_move(
+        principal,
+        sources,
+        destination,
+        move=operation == "move",
+    )
+    runtime.audit.record(
+        f"file.{operation}",
+        actor=principal.name,
+        source=_source(request),
+        success=True,
+        space=space,
+        sources=sources,
+        destination=destination,
+    )
+    return JSONResponse({"entries": [entry.as_dict() for entry in entries]})
 
 
 async def shared_text(request: Request) -> JSONResponse:
@@ -328,6 +401,8 @@ async def create_resumable_upload(request: Request) -> JSONResponse:
     principal = _principal(request)
     # 异步读取并验证请求体是一个 JSON 对象。
     payload = await _json_object(request)
+    space = _space_from_payload(payload)
+    uploads = _uploads_for_space(request, space)
     # 读取浏览器声明的目标路径。
     user_path = payload.get("path")
     # 读取浏览器声明的完整文件字节数。
@@ -349,7 +424,7 @@ async def create_resumable_upload(request: Request) -> JSONResponse:
     if not isinstance(overwrite, bool):
         raise InvalidPathError("overwrite 必须是布尔值")
     # 创建新会话或按 resume_key 恢复已有会话。
-    session = runtime.uploads.create(
+    session = uploads.create(
         # 当前认证用户。
         principal,
         # 最终目标路径。
@@ -379,9 +454,10 @@ async def create_resumable_upload(request: Request) -> JSONResponse:
         size=expected_size,
         # 服务端当前已保存偏移；恢复上传时可能大于零。
         offset=session.offset,
+        space=space,
     )
     # 返回上传 ID、offset 和 chunk_size；201 表示资源已创建。
-    return JSONResponse(runtime.uploads.status_dict(session), status_code=201)
+    return JSONResponse(uploads.status_dict(session), status_code=201)
 
 
 async def upload_chunk(request: Request) -> Response:
@@ -391,10 +467,12 @@ async def upload_chunk(request: Request) -> Response:
     principal = _principal(request)
     # 从路由路径 /uploads/{upload_id} 中取得上传会话 ID。
     upload_id = request.path_params["upload_id"]
+    space = _space_from_query(request)
+    uploads = _uploads_for_space(request, space)
     # 同一路由也承担取消上传功能，DELETE 不会继续进入分块接收逻辑。
     if request.method == "DELETE":
         # 删除临时文件及其内存会话。
-        runtime.uploads.cancel(principal, upload_id)
+        uploads.cancel(principal, upload_id)
         # 记录用户主动取消上传的审计事件。
         runtime.audit.record(
             "upload.cancel", actor=principal.name, source=_source(request), success=True, upload_id=upload_id
@@ -415,7 +493,7 @@ async def upload_chunk(request: Request) -> Response:
     # 严格客户端可在请求头中携带当前分块 SHA-256；浏览器快速模式没有该请求头。
     declared_sha256 = request.headers.get("x-chfs-chunk-sha256") or None
     # 把认证信息、偏移和异步请求体流交给上传管理器。
-    session = await runtime.uploads.append(
+    session = await uploads.append(
         # 当前用户。
         principal,
         # 目标上传会话。
@@ -428,7 +506,7 @@ async def upload_chunk(request: Request) -> Response:
         request.stream(),
     )
     # 分块成功写入后返回最新 offset，浏览器据此推进下一块。
-    return JSONResponse(runtime.uploads.status_dict(session))
+    return JSONResponse(uploads.status_dict(session))
 
 
 async def complete_resumable_upload(request: Request) -> JSONResponse:
@@ -438,6 +516,8 @@ async def complete_resumable_upload(request: Request) -> JSONResponse:
     principal = _principal(request)
     # 从 /uploads/{upload_id}/complete 路由中取得会话 ID。
     upload_id = request.path_params["upload_id"]
+    space = _space_from_query(request)
+    uploads = _uploads_for_space(request, space)
     # 读取完成请求的 JSON 对象；浏览器快速模式发送空对象。
     payload = await _json_object(request)
     # 严格客户端可以提供所有分块摘要组成的清单哈希。
@@ -446,7 +526,7 @@ async def complete_resumable_upload(request: Request) -> JSONResponse:
     if manifest is not None and (not isinstance(manifest, str) or len(manifest) != 64):
         raise InvalidPathError("manifest_sha256 格式无效")
     # 校验长度、刷新磁盘、原子发布文件，并取得最终哈希与文件元数据。
-    entry, file_sha256, manifest_sha256 = runtime.uploads.complete(principal, upload_id, manifest)
+    entry, file_sha256, manifest_sha256 = uploads.complete(principal, upload_id, manifest)
     # 文件真正发布成功后记录一次完整上传审计事件。
     runtime.audit.record(
         # 审计事件类型。
@@ -465,6 +545,7 @@ async def complete_resumable_upload(request: Request) -> JSONResponse:
         sha256=file_sha256,
         # 标记本次上传使用的是可续传协议。
         resumable=True,
+        space=space,
     )
     # 先把 FileEntry 转换为供 API 返回的普通字典。
     result = entry.as_dict()
@@ -490,6 +571,79 @@ def _runtime(request: Request) -> Runtime:
 
 def _source(request: Request) -> str:
     return request.client.host if request.client else "unknown"
+
+
+def _has_computer_access(request: Request) -> bool:
+    runtime = _runtime(request)
+    if runtime.computer_files is None:
+        return False
+    if runtime.config.full_disk_access:
+        return True
+    source_mac = runtime.audit.source_mac(_source(request))
+    return source_mac in runtime.config.trusted_full_disk_macs
+
+
+def _computer_home(request: Request) -> str | None:
+    files = _runtime(request).computer_files
+    if files is None:
+        return None
+    try:
+        return files.resolver.relative(Path.home())
+    except InvalidPathError:
+        return None
+
+
+def _computer_quick_access(request: Request) -> list[dict[str, str]]:
+    """返回适合手机端一键进入的当前 Windows 用户常用目录。"""
+
+    files = _runtime(request).computer_files
+    if files is None:
+        return []
+    candidates = (
+        ("下载", default_downloads_directory()),
+        ("文档", default_documents_directory()),
+    )
+    result: list[dict[str, str]] = []
+    for label, directory in candidates:
+        try:
+            # 不创建用户目录；不存在或不属于已开放磁盘时直接不展示。
+            if directory.is_dir():
+                result.append({"label": label, "path": files.resolver.relative(directory)})
+        except (InvalidPathError, OSError):
+            continue
+    return result
+
+
+def _space_from_query(request: Request) -> str:
+    return _validated_space(request.query_params.get("space", "shared"))
+
+
+def _space_from_payload(payload: dict[str, Any]) -> str:
+    return _validated_space(payload.get("space", "shared"))
+
+
+def _validated_space(value: Any) -> str:
+    if value not in {"shared", "computer"}:
+        raise InvalidPathError("space 必须是 shared 或 computer")
+    return str(value)
+
+
+def _files_for_space(request: Request, space: str) -> FileService:
+    runtime = _runtime(request)
+    if space == "shared":
+        return runtime.files
+    if not _has_computer_access(request) or runtime.computer_files is None:
+        raise PermissionDeniedError("当前设备没有此电脑访问权限")
+    return runtime.computer_files
+
+
+def _uploads_for_space(request: Request, space: str) -> ResumableUploadManager:
+    runtime = _runtime(request)
+    if space == "shared":
+        return runtime.uploads
+    if not _has_computer_access(request) or runtime.computer_uploads is None:
+        raise PermissionDeniedError("当前设备没有此电脑访问权限")
+    return runtime.computer_uploads
 
 
 def _bearer_token(request: Request) -> str | None:

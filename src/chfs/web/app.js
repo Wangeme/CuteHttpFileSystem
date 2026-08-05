@@ -3,12 +3,19 @@
 // 浏览器端只负责交互和协议适配；路径验证、权限和磁盘操作始终由服务端内核执行。
 const state = {
   path: "",
+  space: "shared",
   token: sessionStorage.getItem("chfs_token") || "",
   principal: null,
   authenticationAvailable: false,
   sharedTextRevision: -1,
   sharedTextDirty: false,
   sharedTextEditVersion: 0,
+  computerAccess: false,
+  computerHome: null,
+  computerQuickAccess: [],
+  selectedPaths: new Set(),
+  entriesByPath: new Map(),
+  fileClipboard: null,
 };
 
 const elements = {
@@ -49,6 +56,17 @@ const elements = {
   copyTextButton: document.querySelector("#copyTextButton"),
   pasteTextButton: document.querySelector("#pasteTextButton"),
   clearTextButton: document.querySelector("#clearTextButton"),
+  sharedSpaceButton: document.querySelector("#sharedSpaceButton"),
+  computerSpaceButton: document.querySelector("#computerSpaceButton"),
+  homeButton: document.querySelector("#homeButton"),
+  quickAccess: document.querySelector("#quickAccess"),
+  quickAccessButtons: document.querySelector("#quickAccessButtons"),
+  parentButton: document.querySelector("#parentButton"),
+  copyFilesButton: document.querySelector("#copyFilesButton"),
+  cutFilesButton: document.querySelector("#cutFilesButton"),
+  pasteFilesButton: document.querySelector("#pasteFilesButton"),
+  deleteFilesButton: document.querySelector("#deleteFilesButton"),
+  selectAllFiles: document.querySelector("#selectAllFiles"),
 };
 let sharedTextSaveTimer;
 
@@ -74,6 +92,7 @@ async function api(path, options = {}) {
 }
 
 function joinPath(name) { return state.path ? `${state.path}/${name}` : name; }
+function joinPathAt(basePath, name) { return basePath ? `${basePath}/${name}` : name; }
 function encode(value) { return encodeURIComponent(value); }
 
 async function refreshSession() {
@@ -81,6 +100,9 @@ async function refreshSession() {
     const data = await api("/api/v1/session");
     state.principal = data.principal;
     state.authenticationAvailable = data.authentication_available;
+    state.computerAccess = Boolean(data.computer_access);
+    state.computerHome = data.computer_home || null;
+    state.computerQuickAccess = Array.isArray(data.computer_quick_access) ? data.computer_quick_access : [];
   } catch (error) {
     if (error.code === "authentication_failed") {
       state.token = "";
@@ -88,10 +110,21 @@ async function refreshSession() {
       const guestData = await api("/api/v1/session");
       state.principal = guestData.principal;
       state.authenticationAvailable = guestData.authentication_available;
+      state.computerAccess = Boolean(guestData.computer_access);
+      state.computerHome = guestData.computer_home || null;
+      state.computerQuickAccess = Array.isArray(guestData.computer_quick_access) ? guestData.computer_quick_access : [];
     } else throw error;
   }
   elements.loginButton.textContent = state.principal.authenticated ? `${state.principal.name} · 退出` : "登录";
   elements.loginButton.hidden = !state.authenticationAvailable && !state.principal.authenticated;
+  elements.computerSpaceButton.hidden = !state.computerAccess;
+  elements.homeButton.hidden = !state.computerAccess || !state.computerHome;
+  renderQuickAccess();
+  if (!state.computerAccess && state.space === "computer") {
+    state.space = "shared";
+    state.path = "";
+  }
+  updateLocationControls();
   updatePermissionControls();
 }
 
@@ -103,15 +136,14 @@ function can(permission) {
 function updatePermissionControls() {
   const mayWrite = can("write");
   const mayRead = can("read");
-  elements.uploadButton.disabled = !mayWrite;
-  elements.uploadFolderButton.disabled = !mayWrite;
-  elements.newFolderButton.disabled = !mayWrite;
   elements.sharedText.disabled = !mayRead;
   elements.sharedText.readOnly = !mayWrite;
   elements.refreshTextButton.disabled = !mayRead;
   elements.copyTextButton.disabled = !mayRead;
   elements.pasteTextButton.disabled = !mayWrite;
   elements.clearTextButton.disabled = !mayWrite;
+  updateLocationControls();
+  updateSelectionControls();
   if (!mayRead) {
     elements.sharedText.value = "";
     elements.sharedTextStatus.textContent = "当前身份没有读取权限";
@@ -234,13 +266,24 @@ async function loadFiles() {
   elements.loading.hidden = false;
   elements.empty.hidden = true;
   elements.rows.replaceChildren();
+  state.selectedPaths.clear();
+  state.entriesByPath.clear();
+  elements.selectAllFiles.checked = false;
+  elements.selectAllFiles.indeterminate = false;
+  updateSelectionControls();
   renderBreadcrumbs();
   try {
-    const data = await api(`/api/v1/files?path=${encode(state.path)}`);
+    const data = await api(`/api/v1/files?space=${encode(state.space)}&path=${encode(state.path)}`);
     elements.count.textContent = `${data.entries.length} 项`;
     elements.loading.hidden = true;
     elements.empty.hidden = data.entries.length !== 0;
-    for (const entry of data.entries) elements.rows.append(createRow(entry));
+    const protectEntries = isComputerRoot();
+    for (const entry of data.entries) {
+      // “此电脑”根层列出的是磁盘入口，不是可复制、移动或删除的普通目录。
+      if (!protectEntries) state.entriesByPath.set(entry.path, entry);
+      elements.rows.append(createRow(entry, protectEntries));
+    }
+    updateSelectionControls();
   } catch (error) {
     elements.loading.textContent = error.message;
     elements.count.textContent = "无法读取";
@@ -248,8 +291,20 @@ async function loadFiles() {
   }
 }
 
-function createRow(entry) {
+function createRow(entry, protectedRoot = false) {
   const row = document.createElement("tr");
+  const selectionCell = document.createElement("td");
+  selectionCell.className = "selection-column";
+  const selection = document.createElement("input");
+  selection.type = "checkbox";
+  selection.setAttribute("aria-label", `选择 ${entry.name}`);
+  selection.disabled = protectedRoot;
+  selection.addEventListener("change", () => {
+    if (selection.checked) state.selectedPaths.add(entry.path);
+    else state.selectedPaths.delete(entry.path);
+    updateSelectionControls();
+  });
+  selectionCell.append(selection);
   const nameCell = document.createElement("td");
   const nameWrap = document.createElement("div");
   nameWrap.className = "file-name";
@@ -271,9 +326,9 @@ function createRow(entry) {
   const actions = document.createElement("div");
   actions.className = "row-actions";
   if (entry.type === "file") actions.append(actionButton("下载", () => download(entry.path)));
-  if (can("delete")) actions.append(actionButton("删除", () => removeEntry(entry), true));
+  if (can("delete") && !protectedRoot) actions.append(actionButton("删除", () => removeEntry(entry), true));
   actionsCell.append(actions);
-  row.append(nameCell, size, modified, actionsCell);
+  row.append(selectionCell, nameCell, size, modified, actionsCell);
   return row;
 }
 
@@ -320,9 +375,10 @@ function actionButton(label, handler, danger = false) {
 }
 
 function renderBreadcrumbs() {
+  updateLocationControls();
   elements.breadcrumbs.replaceChildren();
   const parts = state.path ? state.path.split("/") : [];
-  const root = breadcrumb("全部文件", "");
+  const root = breadcrumb(state.space === "computer" ? "此电脑" : "共享目录", "");
   elements.breadcrumbs.append(root);
   parts.forEach((part, index) => elements.breadcrumbs.append(breadcrumb(part, parts.slice(0, index + 1).join("/"))));
 }
@@ -338,10 +394,64 @@ function breadcrumb(label, path) {
 
 function navigate(path) { state.path = path; loadFiles(); }
 
+function switchSpace(space, path = "") {
+  if (space === "computer" && !state.computerAccess) return;
+  state.space = space;
+  state.path = path;
+  updateLocationControls();
+  loadFiles();
+}
+
+function renderQuickAccess() {
+  elements.quickAccessButtons.replaceChildren();
+  state.computerQuickAccess.forEach((entry) => {
+    if (!entry || typeof entry.label !== "string" || typeof entry.path !== "string") return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "location-button quick-access-button";
+    button.textContent = entry.label;
+    button.dataset.path = entry.path;
+    button.addEventListener("click", () => switchSpace("computer", entry.path));
+    elements.quickAccessButtons.append(button);
+  });
+  elements.quickAccess.hidden = !state.computerAccess || elements.quickAccessButtons.childElementCount === 0;
+}
+
+function updateLocationControls() {
+  elements.sharedSpaceButton.classList.toggle("active", state.space === "shared");
+  elements.computerSpaceButton.classList.toggle(
+    "active",
+    state.space === "computer" && state.path !== state.computerHome,
+  );
+  elements.homeButton.classList.toggle(
+    "active",
+    state.space === "computer" && Boolean(state.computerHome) && state.path === state.computerHome,
+  );
+  elements.quickAccessButtons.querySelectorAll(".quick-access-button").forEach((button) => {
+    button.classList.toggle("active", state.space === "computer" && button.dataset.path === state.path);
+  });
+  elements.parentButton.disabled = !state.path;
+  const mayWriteHere = can("write") && !isComputerRoot();
+  elements.uploadButton.disabled = !mayWriteHere;
+  elements.uploadFolderButton.disabled = !mayWriteHere;
+  elements.newFolderButton.disabled = !mayWriteHere;
+}
+
+function isComputerRoot() {
+  return state.space === "computer" && !state.path;
+}
+
+function navigateParent() {
+  if (!state.path) return;
+  const parts = state.path.split("/");
+  parts.pop();
+  navigate(parts.join("/"));
+}
+
 function download(path) {
   // GET 下载可使用登录时签发的窄路径 HttpOnly Cookie，不把令牌暴露在 URL 中。
   const anchor = document.createElement("a");
-  anchor.href = `/api/v1/content?path=${encode(path)}`;
+  anchor.href = `/api/v1/content?space=${encode(state.space)}&path=${encode(path)}`;
   anchor.download = "";
   document.body.append(anchor);
   anchor.click();
@@ -352,15 +462,92 @@ async function removeEntry(entry) {
   const description = entry.type === "directory" ? "文件夹及其中所有内容" : "文件";
   if (!window.confirm(`确定删除${description}“${entry.name}”吗？此操作无法撤销。`)) return;
   try {
-    await api(`/api/v1/files?path=${encode(entry.path)}&recursive=${entry.type === "directory"}`, { method: "DELETE" });
+    await api(`/api/v1/files?space=${encode(state.space)}&path=${encode(entry.path)}&recursive=${entry.type === "directory"}`, { method: "DELETE" });
     toast("已删除");
     await loadFiles();
   } catch (error) { toast(error.message, true); }
 }
 
-async function uploadFiles(files, pathForFile = file => file.name) {
+function updateSelectionControls() {
+  const selectedCount = state.selectedPaths.size;
+  const totalCount = state.entriesByPath.size;
+  const mayWrite = can("write");
+  elements.copyFilesButton.disabled = selectedCount === 0 || !can("read");
+  elements.cutFilesButton.disabled = selectedCount === 0 || !mayWrite || !can("delete");
+  elements.deleteFilesButton.disabled = selectedCount === 0 || !can("delete");
+  elements.pasteFilesButton.disabled = !state.fileClipboard || !mayWrite || state.fileClipboard.space !== state.space;
+  elements.selectAllFiles.checked = totalCount > 0 && selectedCount === totalCount;
+  elements.selectAllFiles.indeterminate = selectedCount > 0 && selectedCount < totalCount;
+  elements.selectAllFiles.disabled = totalCount === 0;
+}
+
+function setFileClipboard(operation) {
+  if (!state.selectedPaths.size) return;
+  state.fileClipboard = {
+    operation,
+    space: state.space,
+    paths: [...state.selectedPaths],
+  };
+  toast(`${operation === "move" ? "已剪切" : "已复制"} ${state.selectedPaths.size} 项，请进入目标目录后粘贴`);
+  updateSelectionControls();
+}
+
+async function pasteFiles() {
+  const clipboard = state.fileClipboard;
+  if (!clipboard) return;
+  if (clipboard.space !== state.space) {
+    toast("暂不支持跨共享目录与此电脑复制", true);
+    return;
+  }
+  try {
+    await api("/api/v1/file-operations", {
+      method: "POST",
+      json: true,
+      body: JSON.stringify({
+        space: state.space,
+        operation: clipboard.operation,
+        sources: clipboard.paths,
+        destination: state.path,
+      }),
+    });
+    if (clipboard.operation === "move") state.fileClipboard = null;
+    toast(clipboard.operation === "move" ? "移动完成" : "复制完成");
+    await loadFiles();
+  } catch (error) {
+    toast(error.message, true);
+  }
+  updateSelectionControls();
+}
+
+async function deleteSelectedFiles() {
+  const entries = [...state.selectedPaths]
+    .map(path => state.entriesByPath.get(path))
+    .filter(Boolean);
+  if (!entries.length) return;
+  if (!window.confirm(`确定删除选中的 ${entries.length} 项吗？文件夹将连同其中内容删除，此操作无法撤销。`)) return;
+  try {
+    for (const entry of entries) {
+      await api(
+        `/api/v1/files?space=${encode(state.space)}&path=${encode(entry.path)}&recursive=${entry.type === "directory"}`,
+        { method: "DELETE" },
+      );
+    }
+    toast(`已删除 ${entries.length} 项`);
+    await loadFiles();
+  } catch (error) {
+    toast(error.message, true);
+    await loadFiles();
+  }
+}
+
+async function uploadFiles(
+  files,
+  pathForFile = file => file.name,
+  context = { space: state.space, path: state.path },
+) {
   // 上传前再次检查当前身份是否拥有写权限；没有权限时立即结束，不创建上传会话。
   if (!can("write")) { toast(state.authenticationAvailable ? "当前身份没有上传权限，请先登录" : "服务端未开放上传权限", true); return; }
+  if (context.space === "computer" && !context.path) { toast("请先进入一个磁盘或目录再上传", true); return; }
   // batch 保存“这一批文件”的统计状态，供进度条和实时速度计算共同使用。
   const batch = {
     // 本批次包含的文件数量。
@@ -389,13 +576,13 @@ async function uploadFiles(files, pathForFile = file => file.name) {
   // 逐个遍历用户选择的文件；这里的 await 使多个文件也是串行上传。
   for (const [index, file] of files.entries()) {
     // 普通上传使用文件名；文件夹上传传入带目录层级的相对路径。
-    const path = joinPath(pathForFile(file));
+    const path = joinPathAt(context.path, pathForFile(file));
     let overwrite = false;
     let finished = false;
     while (!finished) {
       try {
         // 等待当前文件上传完成后才会进入下一个文件。
-        await uploadOne(file, path, batch, index, overwrite);
+        await uploadOne(file, path, batch, index, overwrite, context.space);
         uploadedCount += 1;
         finished = true;
       } catch (error) {
@@ -500,8 +687,13 @@ async function uploadFolder(files) {
     toast(state.authenticationAvailable ? "当前身份没有上传权限，请先登录" : "服务端未开放上传权限", true);
     return;
   }
+  if (isComputerRoot()) {
+    toast("请先进入一个磁盘或目录再上传", true);
+    return;
+  }
 
   try {
+    const context = { space: state.space, path: state.path };
     // 在修改服务端状态前先验证全部文件路径，避免无效文件夹留下半成品目录。
     const plan = folderUploadPlan(files);
     for (const directory of plan.directories) {
@@ -509,26 +701,26 @@ async function uploadFolder(files) {
         await api("/api/v1/directories", {
           method: "POST",
           json: true,
-          body: JSON.stringify({ path: joinPath(directory) }),
+          body: JSON.stringify({ space: context.space, path: joinPathAt(context.path, directory) }),
         });
       } catch (error) {
         // 文件夹上传允许合并进已有目录；若冲突原因不是目录已存在，仍应停止。
         if (!(error?.status === 409 && error?.code === "conflict" && error?.message === "目标已存在")) throw error;
       }
     }
-    await uploadFiles(files, file => plan.paths.get(file));
+    await uploadFiles(files, file => plan.paths.get(file), context);
   } catch (error) {
     toast(`上传文件夹失败：${error.message}`, true);
     await loadFiles();
   }
 }
 
-async function uploadOne(file, path, batch, index, overwrite = false) {
+async function uploadOne(file, path, batch, index, overwrite = false, space = "shared") {
   // 初始化当前文件的上传状态显示。
   updateUploadDisplay(batch, file, index, 0, "准备上传");
 
   // 路径、大小和最后修改时间共同标识一个待续传文件。
-  const storageKey = `chfs-resume:${path}:${file.size}:${file.lastModified}`;
+  const storageKey = `chfs-resume:${space}:${path}:${file.size}:${file.lastModified}`;
   // 从浏览器本地存储读取上次生成的续传标识。
   let resumeKey = localStorage.getItem(storageKey);
   // 第一次上传该文件时，还不存在续传标识。
@@ -545,7 +737,7 @@ async function uploadOne(file, path, batch, index, overwrite = false) {
     // 告诉 api() 请求体和响应体都按 JSON 处理。
     json: true,
     // 默认禁止静默覆盖；只有用户在冲突对话框中明确选择覆盖时才传 true。
-    body: JSON.stringify({ path, size: file.size, resume_key: resumeKey, overwrite }),
+    body: JSON.stringify({ space, path, size: file.size, resume_key: resumeKey, overwrite }),
   });
   // 分块大小由服务端决定；大块可减少高速局域网中的请求确认空档。
   const chunkSize = session.chunk_size;
@@ -570,6 +762,7 @@ async function uploadOne(file, path, batch, index, overwrite = false) {
       prepared.position,
       // Blob 直接交给浏览器网络栈，不经过 JavaScript 连续内存副本。
       prepared.body,
+      space,
       // 传入文件总大小；当前 sendChunk() 尚未实际使用这个参数。
       file.size,
       // XHR 每次报告上传进度时都会调用此回调。
@@ -593,7 +786,7 @@ async function uploadOne(file, path, batch, index, overwrite = false) {
   // 所有字节已到达临时文件，接下来要求服务端持久化并原子发布目标文件。
   updateUploadDisplay(batch, file, index, file.size, "正在原子提交");
   // 调用完成接口；它与“传分块”是两个不同的 HTTP 请求阶段。
-  const completed = await api(`/api/v1/uploads/${encode(session.upload_id)}/complete`, {
+  const completed = await api(`/api/v1/uploads/${encode(session.upload_id)}/complete?space=${encode(space)}`, {
     // POST 表示执行上传事务的最终提交动作。
     method: "POST",
     // 完成接口使用 JSON 格式。
@@ -617,13 +810,13 @@ function prepareUploadChunk(file, position, chunkSize) {
   return { position, end, body };
 }
 
-async function sendChunkWithRetry(uploadId, offset, body, totalSize, onProgress) {
+async function sendChunkWithRetry(uploadId, offset, body, space, totalSize, onProgress) {
   // 保存最后一次异常；三次都失败后把它抛给上层。
   let lastError;
   // 当前策略最多尝试三次，并且每次都重传整个分块。
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     // sendChunk 成功时立即返回服务端的新会话状态。
-    try { return await sendChunk(uploadId, offset, body, totalSize, onProgress); }
+    try { return await sendChunk(uploadId, offset, body, space, totalSize, onProgress); }
     // 网络错误或非 2xx 响应都会进入这里。
     catch (error) {
       // 覆盖保存最新错误，使最终提示反映最后一次失败。
@@ -636,7 +829,7 @@ async function sendChunkWithRetry(uploadId, offset, body, totalSize, onProgress)
   throw lastError;
 }
 
-function sendChunk(uploadId, offset, body, totalSize, onProgress) {
+function sendChunk(uploadId, offset, body, space, totalSize, onProgress) {
   // XMLHttpRequest 是事件式 API，这里用 Promise 包装成可 await 的形式。
   return new Promise((resolve, reject) => {
     // 记录上一次 progress 事件的累计值，用来计算本次新增流量。
@@ -644,7 +837,7 @@ function sendChunk(uploadId, offset, body, totalSize, onProgress) {
     // 每个分块创建一个新的 XHR（XMLHttpRequest）对象和一个 PATCH 请求。
     const xhr = new XMLHttpRequest();
     // URL 中同时携带上传会话 ID 和当前分块在文件中的偏移。
-    xhr.open("PATCH", `/api/v1/uploads/${encode(uploadId)}?offset=${offset}`);
+    xhr.open("PATCH", `/api/v1/uploads/${encode(uploadId)}?space=${encode(space)}&offset=${offset}`);
     // 登录状态下附加 Bearer Token，供服务端鉴权。
     if (state.token) xhr.setRequestHeader("Authorization", `Bearer ${state.token}`);
     // 监听“请求体上传到网络层”的进度；它不等同于服务端已经写盘。
@@ -758,7 +951,11 @@ elements.folderForm.addEventListener("submit", async event => {
   elements.folderError.textContent = "";
   if (!name || name.includes("/") || name.includes("\\")) { elements.folderError.textContent = "名称不能为空，也不能包含斜杠。"; return; }
   try {
-    await api("/api/v1/directories", { method: "POST", json: true, body: JSON.stringify({ path: joinPath(name) }) });
+    await api("/api/v1/directories", {
+      method: "POST",
+      json: true,
+      body: JSON.stringify({ space: state.space, path: joinPath(name) }),
+    });
     elements.folderDialog.close(); elements.folderForm.reset(); toast("文件夹已创建"); await loadFiles();
   } catch (error) { elements.folderError.textContent = error.message; }
 });
@@ -772,6 +969,25 @@ elements.folderPicker.addEventListener("change", async () => {
   // 先清空选择器，使用户在失败后仍能立即重新选择同一个文件夹。
   elements.folderPicker.value = "";
   if (files.length) await uploadFolder(files);
+});
+
+elements.sharedSpaceButton.addEventListener("click", () => switchSpace("shared"));
+elements.computerSpaceButton.addEventListener("click", () => switchSpace("computer"));
+elements.homeButton.addEventListener("click", () => switchSpace("computer", state.computerHome || ""));
+elements.parentButton.addEventListener("click", navigateParent);
+elements.copyFilesButton.addEventListener("click", () => setFileClipboard("copy"));
+elements.cutFilesButton.addEventListener("click", () => setFileClipboard("move"));
+elements.pasteFilesButton.addEventListener("click", pasteFiles);
+elements.deleteFilesButton.addEventListener("click", deleteSelectedFiles);
+elements.selectAllFiles.addEventListener("change", () => {
+  state.selectedPaths.clear();
+  for (const checkbox of elements.rows.querySelectorAll('input[type="checkbox"]')) {
+    if (!checkbox.disabled) checkbox.checked = elements.selectAllFiles.checked;
+  }
+  if (elements.selectAllFiles.checked) {
+    for (const path of state.entriesByPath.keys()) state.selectedPaths.add(path);
+  }
+  updateSelectionControls();
 });
 
 document.querySelector("#uploadButton").addEventListener("click", () => elements.filePicker.click());

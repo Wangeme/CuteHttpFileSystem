@@ -58,6 +58,41 @@ class FileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.delete(self.writer, "a", recursive=True)
         self.assertFalse((self.root / "a").exists())
 
+    async def test_copy_and_move_multiple_entries(self) -> None:
+        (self.root / "source").mkdir()
+        (self.root / "source" / "a.txt").write_text("a", encoding="utf-8")
+        (self.root / "source" / "folder").mkdir()
+        (self.root / "source" / "folder" / "b.txt").write_text("b", encoding="utf-8")
+        (self.root / "copy-target").mkdir()
+        (self.root / "move-target").mkdir()
+
+        copied = self.service.copy_or_move(
+            self.writer,
+            ["source/a.txt", "source/folder"],
+            "copy-target",
+        )
+        self.assertEqual({item.name for item in copied}, {"a.txt", "folder"})
+        self.assertEqual((self.root / "copy-target" / "folder" / "b.txt").read_text(), "b")
+
+        moved = self.service.copy_or_move(
+            self.writer,
+            ["source/a.txt"],
+            "move-target",
+            move=True,
+        )
+        self.assertEqual(moved[0].path, "move-target/a.txt")
+        self.assertFalse((self.root / "source" / "a.txt").exists())
+
+    async def test_copy_rejects_existing_target_and_descendant(self) -> None:
+        (self.root / "source").mkdir()
+        (self.root / "source" / "item.txt").write_text("x", encoding="utf-8")
+        (self.root / "target").mkdir()
+        (self.root / "target" / "item.txt").write_text("existing", encoding="utf-8")
+        with self.assertRaises(ResourceConflictError):
+            self.service.copy_or_move(self.writer, ["source/item.txt"], "target")
+        with self.assertRaises(ResourceConflictError):
+            self.service.copy_or_move(self.writer, ["source"], "source")
+
 
 if __name__ == "__main__":
     unittest.main()
