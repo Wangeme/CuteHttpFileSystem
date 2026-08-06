@@ -91,6 +91,7 @@ class AppConfig:
     accounts: tuple[Account, ...] = ()
     full_disk_access: bool = False
     trusted_full_disk_macs: tuple[str, ...] = ()
+    show_local_addresses: bool = False
 
     @classmethod
     def load(cls, config_path: Path) -> "AppConfig":
@@ -141,6 +142,7 @@ class AppConfig:
             ],
             "full_disk_access": self.full_disk_access,
             "trusted_full_disk_macs": list(self.trusted_full_disk_macs),
+            "show_local_addresses": self.show_local_addresses,
         }
 
     def save(self, config_path: Path) -> None:
@@ -186,6 +188,7 @@ class AppConfig:
             "accounts",
             "full_disk_access",
             "trusted_full_disk_macs",
+            "show_local_addresses",
         }
         unknown = sorted(set(data) - allowed_keys)
         if unknown:
@@ -225,6 +228,9 @@ class AppConfig:
             data.get("trusted_full_disk_macs", []),
             "trusted_full_disk_macs",
         )
+        show_local_addresses = data.get("show_local_addresses", False)
+        if not isinstance(show_local_addresses, bool):
+            raise InvalidConfigurationError("show_local_addresses 必须是布尔值")
         usernames = [item.username for item in accounts]
         if len(usernames) != len(set(usernames)):
             raise InvalidConfigurationError("账户用户名不能重复")
@@ -243,6 +249,7 @@ class AppConfig:
             accounts=accounts,
             full_disk_access=full_disk_access,
             trusted_full_disk_macs=trusted_full_disk_macs,
+            show_local_addresses=show_local_addresses,
         )
 
 

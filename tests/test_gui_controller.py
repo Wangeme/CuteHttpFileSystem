@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from chfs.config import AppConfig
-from chfs.gui.controller import ServerController, discover_urls
+from chfs.gui.controller import ServerController, discover_urls, group_access_urls
 
 
 class ServerControllerTests(unittest.TestCase):
@@ -78,6 +78,21 @@ class ServerControllerTests(unittest.TestCase):
         ]
         with patch("chfs.gui.controller.socket.getaddrinfo", return_value=addresses):
             self.assertEqual(discover_urls("::", 8080), ["http://[fd00::2]:8080", "http://[::1]:8080"])
+
+    def test_access_urls_separate_preferred_lan_from_local_alternatives(self) -> None:
+        urls = [
+            "http://10.186.56.121:8080",
+            "http://172.25.224.1:8080",
+            "http://127.0.0.1:8080",
+        ]
+        lan, local = group_access_urls(urls)
+        self.assertEqual(lan, ["http://10.186.56.121:8080"])
+        self.assertEqual(local, ["http://172.25.224.1:8080", "http://127.0.0.1:8080"])
+
+    def test_loopback_only_access_remains_available_as_local_address(self) -> None:
+        lan, local = group_access_urls(["http://127.0.0.1:8080"])
+        self.assertEqual(lan, [])
+        self.assertEqual(local, ["http://127.0.0.1:8080"])
 
 
 if __name__ == "__main__":

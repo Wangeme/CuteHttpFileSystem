@@ -40,7 +40,7 @@ from ..errors import CHFSError
 from ..models import Permission
 from ..security import Account, hash_password
 from .bandwidth_heartbeat import BandwidthHeartbeat
-from .controller import ServerController, discover_urls
+from .controller import ServerController, discover_urls, group_access_urls
 
 BG = "#070d13"
 SIDEBAR = "#090f15"
@@ -134,6 +134,7 @@ class CHFSApplication(tk.Tk):
         self.write_var = tk.BooleanVar(value=Permission.WRITE in self.config.guest_permissions)
         self.delete_var = tk.BooleanVar(value=Permission.DELETE in self.config.guest_permissions)
         self.full_disk_var = tk.BooleanVar(value=self.config.full_disk_access)
+        self.show_local_addresses_var = tk.BooleanVar(value=self.config.show_local_addresses)
         self._allow_network_draft = tuple(self.config.allow_networks)
         self._deny_network_draft = tuple(self.config.deny_networks)
         self.auto_save_status_var = tk.StringVar(value="更改将自动保存并应用")
@@ -236,6 +237,17 @@ class CHFSApplication(tk.Tk):
         style.configure("TCombobox", padding=8)
         style.configure("TCheckbutton", background=BG, foreground=TEXT)
         style.map("TCheckbutton", background=[("active", BG)])
+        style.configure(
+            "Surface.TCheckbutton",
+            background=SURFACE,
+            foreground=MUTED,
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.map(
+            "Surface.TCheckbutton",
+            background=[("active", SURFACE)],
+            foreground=[("active", TEXT), ("selected", ACCENT)],
+        )
         style.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT, rowheight=25, borderwidth=0, font=("Cascadia Mono", 8))
         style.configure("Treeview.Heading", background=SURFACE_ALT, foreground=MUTED, padding=6, borderwidth=1, font=("Microsoft YaHei UI", 8))
         style.map("Treeview", background=[("selected", ACCENT_DARK)])
@@ -376,13 +388,37 @@ class CHFSApplication(tk.Tk):
         addresses = ttk.Frame(upper, style="Surface.TFrame", padding=(16, 14))
         self._overview_addresses = addresses
         addresses.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        ttk.Label(addresses, text="访问地址", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
-        ttk.Label(addresses, text="左键打开 · 右键复制 · 悬停切换二维码", style="CardTitle.TLabel").pack(anchor="w", pady=(3, 12))
+        address_header = ttk.Frame(addresses, style="FlatSurface.TFrame")
+        address_header.pack(fill="x", pady=(0, 12))
+        address_heading = ttk.Frame(address_header, style="FlatSurface.TFrame")
+        address_heading.pack(side="left", fill="x", expand=True)
+        ttk.Label(
+            address_heading,
+            text="访问地址",
+            style="Surface.TLabel",
+            font=("Microsoft YaHei UI", 11, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            address_heading,
+            text="点击打开 · 右键复制 · 悬停预览二维码",
+            style="CardTitle.TLabel",
+        ).pack(anchor="w", pady=(3, 0))
+        ttk.Checkbutton(
+            address_header,
+            text="显示本机地址",
+            variable=self.show_local_addresses_var,
+            command=self._toggle_local_address_visibility,
+            style="Surface.TCheckbutton",
+        ).pack(side="right", anchor="n", padx=(12, 0))
         urls = discover_urls(
             self.host_var.get(),
             self._safe_int(self.port_var.get(), 8080),
             https=bool(self.tls_cert_var.get() and self.tls_key_var.get()),
         )
+        lan_urls, local_urls = group_access_urls(urls)
+        visible_urls = [("局域网", url) for url in lan_urls]
+        if self.show_local_addresses_var.get() or not visible_urls:
+            visible_urls.extend(("本机", url) for url in local_urls)
         body = ttk.Frame(addresses, style="FlatSurface.TFrame")
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
@@ -397,19 +433,27 @@ class CHFSApplication(tk.Tk):
             bd=0,
         )
         qr_panel.grid(row=0, column=1, sticky="n")
+        tk.Label(
+            qr_panel,
+            text="扫码访问",
+            bg=SURFACE,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8),
+            bd=0,
+        ).pack(anchor="center", pady=(0, 6))
         self.qr_label = tk.Label(qr_panel, bg="#ffffff", bd=0)
         self.qr_label.pack(anchor="center")
 
-        for index, url in enumerate(urls):
+        for index, (kind, url) in enumerate(visible_urls):
             row = ttk.Frame(address_list, style="AddressRow.TFrame", padding=(10, 8))
-            row.pack(fill="x", pady=(0, 6) if index < len(urls) - 1 else 0)
+            row.pack(fill="x", pady=(0, 6) if index < len(visible_urls) - 1 else 0)
             tk.Label(
                 row,
-                text="局域网地址" if index == 0 and "127.0.0.1" not in url else "本机地址",
+                text=kind,
                 bg=SURFACE_ALT,
                 fg=MUTED,
                 font=("Microsoft YaHei UI", 9),
-                width=8,
+                width=6,
                 anchor="w",
                 justify="left",
                 padx=0,
@@ -431,9 +475,8 @@ class CHFSApplication(tk.Tk):
             url_label.bind("<Button-3>", lambda _event, value=url: self._copy(value))
             row.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
             url_label.bind("<Enter>", lambda _event, value=url: self._show_qr(value))
-        if urls:
-            preferred = next((item for item in urls if "192.168." in item or "10." in item or "172." in item), urls[0])
-            self._show_qr(preferred)
+        if visible_urls:
+            self._show_qr(visible_urls[0][1])
 
         service = ttk.Frame(upper, style="Surface.TFrame", padding=(16, 14))
         self._overview_service = service
@@ -979,8 +1022,15 @@ class CHFSApplication(tk.Tk):
             "full_disk_access": self.full_disk_var.get(),
             # 可信设备 MAC 暂不在 GUI 中编辑，但保存其他设置时必须原样保留。
             "trusted_full_disk_macs": list(self.config.trusted_full_disk_macs),
+            "show_local_addresses": self.show_local_addresses_var.get(),
         }
         return AppConfig.from_dict(document, base_dir=self.config_path.parent)
+
+    def _toggle_local_address_visibility(self) -> None:
+        """只保存概览显示偏好，不重启正在传输文件的 HTTP 服务。"""
+
+        if self._save_config(quiet=True, restart_running=False, automatic=True):
+            self.show_page("overview")
 
     def _toggle_full_disk_access(self) -> None:
         self._auto_save_suspended = True

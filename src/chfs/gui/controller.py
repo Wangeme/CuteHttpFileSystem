@@ -7,6 +7,7 @@ import threading
 import ipaddress
 import logging
 from collections.abc import Callable
+from urllib.parse import urlsplit
 
 import uvicorn
 
@@ -231,3 +232,28 @@ def discover_urls(host: str, port: int, *, https: bool = False) -> list[str]:
         display = f"[{address}]" if ":" in address else address
         result.append(f"{'https' if https else 'http'}://{display}:{port}")
     return result
+
+
+def group_access_urls(urls: list[str]) -> tuple[list[str], list[str]]:
+    """把首选非回环地址归为局域网入口，其余归为本机备用入口。
+
+    ``discover_urls`` 已把最适合其他设备访问的地址排在前面。桌面概览只突出
+    第一个非回环入口，避免把虚拟网卡和回环地址与真正要发给手机的地址混在一起。
+    """
+
+    preferred_index: int | None = None
+    for index, url in enumerate(urls):
+        hostname = urlsplit(url).hostname
+        if hostname is None:
+            continue
+        try:
+            if not ipaddress.ip_address(hostname.split("%", 1)[0]).is_loopback:
+                preferred_index = index
+                break
+        except ValueError:
+            # 固定配置的主机名（例如局域网 DNS 名称）也可作为首选入口。
+            preferred_index = index
+            break
+    if preferred_index is None:
+        return [], list(urls)
+    return [urls[preferred_index]], [url for index, url in enumerate(urls) if index != preferred_index]

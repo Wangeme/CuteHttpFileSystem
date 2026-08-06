@@ -16,6 +16,7 @@ class AppConfigTests(unittest.TestCase):
         config = AppConfig.from_dict({"share_root": "data"}, base_dir=Path.cwd())
         self.assertEqual(config.host, "0.0.0.0")
         self.assertFalse(config.full_disk_access)
+        self.assertFalse(config.show_local_addresses)
         self.assertEqual(
             config.guest_permissions,
             frozenset({Permission.READ, Permission.WRITE, Permission.DELETE}),
@@ -58,6 +59,8 @@ class AppConfigTests(unittest.TestCase):
             AppConfig.from_dict({"share_root": "data", "port": True}, base_dir=Path.cwd())
         with self.assertRaises(InvalidConfigurationError):
             AppConfig.from_dict({"share_root": "data", "full_disk_access": "yes"}, base_dir=Path.cwd())
+        with self.assertRaises(InvalidConfigurationError):
+            AppConfig.from_dict({"share_root": "data", "show_local_addresses": "yes"}, base_dir=Path.cwd())
 
     def test_tls_files_must_be_configured_as_existing_pair(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
