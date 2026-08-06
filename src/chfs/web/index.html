@@ -79,6 +79,15 @@
           </div>
           <div class="file-toolbar-status">
             <div id="itemCount" class="item-count">正在读取…</div>
+            <label class="sort-control">
+              <span>排序</span>
+              <select id="sortSelect" aria-label="文件排序方式">
+                <option value="modified-desc">修改时间：最新优先</option>
+                <option value="modified-asc">修改时间：最旧优先</option>
+                <option value="type-asc">文件类型：A–Z</option>
+                <option value="type-desc">文件类型：Z–A</option>
+              </select>
+            </label>
             <button id="refreshButton" class="button button-quiet" type="button">刷新</button>
           </div>
         </div>

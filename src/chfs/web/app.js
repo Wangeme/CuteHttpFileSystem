@@ -15,6 +15,9 @@ const state = {
   computerQuickAccess: [],
   selectedPaths: new Set(),
   entriesByPath: new Map(),
+  currentEntries: [],
+  protectedRootEntries: false,
+  sortMode: "modified-desc",
   fileClipboard: null,
 };
 
@@ -25,6 +28,7 @@ const elements = {
   empty: document.querySelector("#emptyState"),
   loading: document.querySelector("#loadingState"),
   count: document.querySelector("#itemCount"),
+  sortSelect: document.querySelector("#sortSelect"),
   breadcrumbs: document.querySelector("#breadcrumbs"),
   loginButton: document.querySelector("#loginButton"),
   loginDialog: document.querySelector("#loginDialog"),
@@ -268,6 +272,8 @@ async function loadFiles() {
   elements.rows.replaceChildren();
   state.selectedPaths.clear();
   state.entriesByPath.clear();
+  state.currentEntries = [];
+  state.protectedRootEntries = false;
   elements.selectAllFiles.checked = false;
   elements.selectAllFiles.indeterminate = false;
   updateSelectionControls();
@@ -278,11 +284,13 @@ async function loadFiles() {
     elements.loading.hidden = true;
     elements.empty.hidden = data.entries.length !== 0;
     const protectEntries = isComputerRoot();
+    state.currentEntries = data.entries;
+    state.protectedRootEntries = protectEntries;
     for (const entry of data.entries) {
       // “此电脑”根层列出的是磁盘入口，不是可复制、移动或删除的普通目录。
       if (!protectEntries) state.entriesByPath.set(entry.path, entry);
-      elements.rows.append(createRow(entry, protectEntries));
     }
+    renderSortedEntries();
     updateSelectionControls();
   } catch (error) {
     elements.loading.textContent = error.message;
@@ -291,12 +299,46 @@ async function loadFiles() {
   }
 }
 
+function renderSortedEntries() {
+  elements.rows.replaceChildren();
+  const entries = sortEntries(state.currentEntries, state.sortMode);
+  for (const entry of entries) {
+    elements.rows.append(createRow(entry, state.protectedRootEntries));
+  }
+}
+
+function sortEntries(entries, mode) {
+  const direction = mode.endsWith("-desc") ? -1 : 1;
+  const collator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
+  return [...entries].sort((left, right) => {
+    if (mode.startsWith("type-")) {
+      // 与资源管理器一致：文件夹始终排在文件前；文件按扩展名分组。
+      if (left.type !== right.type) return left.type === "directory" ? -1 : 1;
+      const typeComparison = collator.compare(fileTypeKey(left), fileTypeKey(right));
+      if (typeComparison !== 0) return typeComparison * direction;
+    } else {
+      const timeComparison = Number(left.modified_ns) - Number(right.modified_ns);
+      if (timeComparison !== 0) return timeComparison * direction;
+    }
+    return collator.compare(left.name, right.name);
+  });
+}
+
+function fileTypeKey(entry) {
+  if (entry.type === "directory") return "";
+  const dotIndex = entry.name.lastIndexOf(".");
+  return dotIndex > 0 && dotIndex < entry.name.length - 1
+    ? entry.name.slice(dotIndex + 1).toLocaleLowerCase("zh-CN")
+    : "";
+}
+
 function createRow(entry, protectedRoot = false) {
   const row = document.createElement("tr");
   const selectionCell = document.createElement("td");
   selectionCell.className = "selection-column";
   const selection = document.createElement("input");
   selection.type = "checkbox";
+  selection.checked = state.selectedPaths.has(entry.path);
   selection.setAttribute("aria-label", `选择 ${entry.name}`);
   selection.disabled = protectedRoot;
   selection.addEventListener("change", () => {
@@ -987,6 +1029,11 @@ elements.selectAllFiles.addEventListener("change", () => {
   if (elements.selectAllFiles.checked) {
     for (const path of state.entriesByPath.keys()) state.selectedPaths.add(path);
   }
+  updateSelectionControls();
+});
+elements.sortSelect.addEventListener("change", () => {
+  state.sortMode = elements.sortSelect.value;
+  renderSortedEntries();
   updateSelectionControls();
 });
 
