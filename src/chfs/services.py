@@ -6,8 +6,9 @@ import os
 import shutil
 import tempfile
 from collections.abc import AsyncIterable, Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
+from .archives import ArchiveSource
 from .errors import (
     ResourceConflictError,
     ResourceNotFoundError,
@@ -64,6 +65,36 @@ class FileService:
         if not target.exists() or not target.is_file():
             raise ResourceNotFoundError("文件不存在")
         return target
+
+    def open_archive(self, principal: Principal, user_paths: list[str]) -> list[ArchiveSource]:
+        """校验一批待打包项目，并返回不暴露绝对路径的归档入口。"""
+
+        require(principal, Permission.READ)
+        if not user_paths:
+            raise ResourceConflictError("没有选择要下载的文件或文件夹")
+        if len(user_paths) > 100:
+            raise ResourceConflictError("一次最多下载 100 个项目")
+
+        sources: list[ArchiveSource] = []
+        seen: set[str] = set()
+        for user_path in user_paths:
+            if not isinstance(user_path, str) or not user_path:
+                raise ResourceConflictError("下载路径不能为空")
+            target = self.resolver.resolve(user_path)
+            if not target.exists():
+                raise ResourceNotFoundError(f"目标不存在：{user_path}")
+            if not target.is_file() and not target.is_dir():
+                raise ResourceConflictError(f"不支持下载特殊文件：{user_path}")
+            public_path = self.resolver.relative(target)
+            key = os.path.normcase(str(target))
+            if key in seen:
+                continue
+            seen.add(key)
+            name = PurePosixPath(public_path).name
+            if not name:
+                raise ResourceConflictError("不能打包未命名的根目录")
+            sources.append(ArchiveSource(target, name, public_path))
+        return sources
 
     async def upload(
         self,

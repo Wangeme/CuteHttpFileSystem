@@ -11,6 +11,7 @@
 | DELETE | `/api/v1/session` | 登录 | 注销当前令牌。 |
 | GET | `/api/v1/files?space=shared&path=` | read | 列出目录；受信任设备可使用 `space=computer`。 |
 | GET | `/api/v1/content?space=shared&path=` | read | 下载文件。 |
+| GET | `/api/v1/archive?space=shared&path=目录` | read | 将一个或多个重复 `path` 参数实时打包为 ZIP 下载。 |
 | PUT | `/api/v1/content?space=shared&path=&overwrite=false` | write | 请求体为原始文件字节。 |
 | POST | `/api/v1/uploads` | write | 创建或按恢复键恢复分块上传会话。 |
 | PATCH | `/api/v1/uploads/{upload_id}?offset=` | write | 按精确偏移追加分块；可携带严格校验摘要。 |
@@ -26,7 +27,7 @@
 {"error":{"code":"permission_denied","message":"当前身份没有执行此操作的权限"},"request_id":"..."}
 ```
 
-登录还会签发路径限制为 `/api/v1/content` 的 HttpOnly Cookie，仅供浏览器原生 GET 下载使用；
+登录还会分别签发路径限制为 `/api/v1/content` 和 `/api/v1/archive` 的 HttpOnly Cookie，仅供浏览器原生 GET 下载使用；
 上传、删除和新建目录始终要求 Bearer 令牌，Cookie 不能授权写操作。
 
 ## 分块上传协议
@@ -50,6 +51,7 @@ Content-Type: application/octet-stream
 SHA-256、执行 `fsync` 并原子发布。偏移不一致返回 HTTP 409。
 
 `GET /api/v1/content` 支持 `Range: bytes=start-end`，成功的部分响应为 HTTP 206。
+`GET /api/v1/archive` 使用 ZIP_STORED 和 ZIP64 边生成边发送，不在服务器落地临时归档，也不会把完整 ZIP 装入内存。
 
 ## 共享文本
 

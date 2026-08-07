@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import http.cookiejar
 import hashlib
+import io
 import socket
 import tempfile
 import threading
@@ -11,6 +12,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -115,6 +117,7 @@ class HttpIntegrationTests(unittest.TestCase):
         self.assertIn('id="computerSpaceButton"', html)
         self.assertIn('id="quickAccess"', html)
         self.assertIn('id="parentButton"', html)
+        self.assertIn('id="downloadFilesButton"', html)
         self.assertIn('id="pasteFilesButton"', html)
         self.assertIn('id="sortSelect"', html)
         self.assertIn('id="uploadSpeed"', html)
@@ -132,6 +135,8 @@ class HttpIntegrationTests(unittest.TestCase):
         self.assertIn(b"isExistingFileConflict", body)
         self.assertIn(b"switchSpace", body)
         self.assertIn(b"pasteFiles", body)
+        self.assertIn(b"downloadArchive", body)
+        self.assertIn(b"downloadSelected", body)
         self.assertIn(b"sortEntries", body)
         self.assertIn(b'"modified-desc"', body)
         self.assertIn(b"webkitRelativePath", body)
@@ -250,6 +255,22 @@ class HttpIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body.decode(), "你好，CHFS")
 
+        status, body, headers = self.request(
+            "GET",
+            f"/api/v1/archive?space=shared&path={urllib.parse.quote('资料')}",
+            token=token,
+        )
+        self.assertEqual(status, 200)
+        normalized_headers = {key.casefold(): value for key, value in headers.items()}
+        self.assertEqual(normalized_headers["content-type"], "application/zip")
+        self.assertIn(
+            "filename*=UTF-8''%E8%B5%84%E6%96%99.zip",
+            normalized_headers["content-disposition"],
+        )
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            self.assertEqual(archive.namelist(), ["资料/", "资料/你好.txt"])
+            self.assertEqual(archive.read("资料/你好.txt").decode("utf-8"), "你好，CHFS")
+
         # 浏览器文件管理器的复制/粘贴走服务端操作，不需要把文件先下载到客户端。
         status, _, _ = self.request(
             "POST",
@@ -284,10 +305,14 @@ class HttpIntegrationTests(unittest.TestCase):
         self.assertIn("session.login", actions)
         self.assertIn("file.upload", actions)
         self.assertIn("file.download", actions)
+        self.assertIn("archive.download", actions)
         self.assertIn("file.delete", actions)
 
     def test_encoded_path_traversal_is_rejected(self) -> None:
         status, body, _ = self.request("GET", "/api/v1/files?path=..%2Fsecret")
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error"]["code"], "invalid_path")
+        status, body, _ = self.request("GET", "/api/v1/archive?path=..%2Fsecret")
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body)["error"]["code"], "invalid_path")
 
@@ -407,6 +432,9 @@ class DownloadCookieSecurityTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
         with opener.open(self.base_url + "/api/v1/content?path=private.txt", timeout=3) as response:
             self.assertEqual(response.read(), b"private")
+        with opener.open(self.base_url + "/api/v1/archive?path=private.txt", timeout=3) as response:
+            with zipfile.ZipFile(io.BytesIO(response.read())) as archive:
+                self.assertEqual(archive.read("private.txt"), b"private")
 
         write = urllib.request.Request(
             self.base_url + "/api/v1/content?path=forbidden.txt",

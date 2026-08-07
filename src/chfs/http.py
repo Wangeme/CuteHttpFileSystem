@@ -5,17 +5,20 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from . import __version__
+from .archives import ArchiveSource, stream_zip_archive
 from .audit import AuditLogger
 from .config import AppConfig, default_documents_directory, default_downloads_directory
 from .errors import AuthenticationError, CHFSError, InvalidPathError, PermissionDeniedError
@@ -166,6 +169,7 @@ def create_app(config: AppConfig) -> Starlette:
         Route("/api/v1/session", delete_session, methods=["DELETE"]),
         Route("/api/v1/files", list_or_delete_files, methods=["GET", "DELETE"]),
         Route("/api/v1/content", content, methods=["GET", "PUT"]),
+        Route("/api/v1/archive", download_archive, methods=["GET"]),
         Route("/api/v1/directories", create_directory, methods=["POST"]),
         Route("/api/v1/file-operations", file_operations, methods=["POST"]),
         Route("/api/v1/shared-text", shared_text, methods=["GET", "PUT"]),
@@ -236,6 +240,15 @@ async def session_endpoint(request: Request) -> JSONResponse:
         secure=False,
         path="/api/v1/content",
     )
+    response.set_cookie(
+        "chfs_archive_session",
+        session.token,
+        max_age=runtime.config.session_ttl_seconds,
+        httponly=True,
+        samesite="strict",
+        secure=False,
+        path="/api/v1/archive",
+    )
     return response
 
 
@@ -249,6 +262,7 @@ async def delete_session(request: Request) -> Response:
     runtime.audit.record("session.logout", actor=principal.name, source=_source(request), success=True)
     response = Response(status_code=204)
     response.delete_cookie("chfs_download_session", path="/api/v1/content")
+    response.delete_cookie("chfs_archive_session", path="/api/v1/archive")
     return response
 
 
@@ -332,6 +346,48 @@ async def create_directory(request: Request) -> JSONResponse:
         space=space, path=user_path
     )
     return JSONResponse(entry.as_dict(), status_code=201)
+
+
+async def download_archive(request: Request) -> StreamingResponse:
+    """把一个或多个文件/文件夹实时打包为 ZIP，并交给浏览器原生下载。"""
+
+    runtime = _runtime(request)
+    principal = _principal(request)
+    if not principal.authenticated:
+        cookie_token = request.cookies.get("chfs_archive_session")
+        if cookie_token:
+            principal = runtime.sessions.resolve(cookie_token)
+    space = _space_from_query(request)
+    files = _files_for_space(request, space)
+    requested_paths = request.query_params.getlist("path")
+    sources = files.open_archive(principal, requested_paths)
+    filename = _archive_filename(sources)
+    runtime.audit.record(
+        "archive.download",
+        actor=principal.name,
+        source=_source(request),
+        success=True,
+        space=space,
+        paths=[source.public_path for source in sources],
+        count=len(sources),
+    )
+    encoded_filename = quote(filename, safe="")
+    return StreamingResponse(
+        stream_zip_archive(sources, files.resolver),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="CHFS-download.zip"; filename*=UTF-8\'\'{encoded_filename}'
+            ),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def _archive_filename(sources: list[ArchiveSource]) -> str:
+    if len(sources) == 1:
+        return f"{sources[0].name}.zip"
+    return f"CHFS-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
 
 
 async def file_operations(request: Request) -> JSONResponse:

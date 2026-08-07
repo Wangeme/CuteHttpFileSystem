@@ -66,6 +66,7 @@ const elements = {
   quickAccess: document.querySelector("#quickAccess"),
   quickAccessButtons: document.querySelector("#quickAccessButtons"),
   parentButton: document.querySelector("#parentButton"),
+  downloadFilesButton: document.querySelector("#downloadFilesButton"),
   copyFilesButton: document.querySelector("#copyFilesButton"),
   cutFilesButton: document.querySelector("#cutFilesButton"),
   pasteFilesButton: document.querySelector("#pasteFilesButton"),
@@ -367,7 +368,7 @@ function createRow(entry, protectedRoot = false) {
   const actionsCell = document.createElement("td");
   const actions = document.createElement("div");
   actions.className = "row-actions";
-  if (entry.type === "file") actions.append(actionButton("下载", () => download(entry.path)));
+  if (!protectedRoot) actions.append(actionButton("下载", () => downloadEntry(entry)));
   if (can("delete") && !protectedRoot) actions.append(actionButton("删除", () => removeEntry(entry), true));
   actionsCell.append(actions);
   row.append(selectionCell, nameCell, size, modified, actionsCell);
@@ -500,6 +501,35 @@ function download(path) {
   anchor.remove();
 }
 
+function triggerDownload(url) {
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+function downloadArchive(paths) {
+  const query = new URLSearchParams({ space: state.space });
+  for (const path of paths) query.append("path", path);
+  triggerDownload(`/api/v1/archive?${query.toString()}`);
+}
+
+function downloadEntry(entry) {
+  if (entry.type === "file") download(entry.path);
+  else downloadArchive([entry.path]);
+}
+
+function downloadSelected() {
+  const entries = [...state.selectedPaths]
+    .map(path => state.entriesByPath.get(path))
+    .filter(Boolean);
+  if (!entries.length) return;
+  if (entries.length === 1 && entries[0].type === "file") download(entries[0].path);
+  else downloadArchive(entries.map(entry => entry.path));
+}
+
 async function removeEntry(entry) {
   const description = entry.type === "directory" ? "文件夹及其中所有内容" : "文件";
   if (!window.confirm(`确定删除${description}“${entry.name}”吗？此操作无法撤销。`)) return;
@@ -514,6 +544,7 @@ function updateSelectionControls() {
   const selectedCount = state.selectedPaths.size;
   const totalCount = state.entriesByPath.size;
   const mayWrite = can("write");
+  elements.downloadFilesButton.disabled = selectedCount === 0 || !can("read");
   elements.copyFilesButton.disabled = selectedCount === 0 || !can("read");
   elements.cutFilesButton.disabled = selectedCount === 0 || !mayWrite || !can("delete");
   elements.deleteFilesButton.disabled = selectedCount === 0 || !can("delete");
@@ -1017,6 +1048,7 @@ elements.sharedSpaceButton.addEventListener("click", () => switchSpace("shared")
 elements.computerSpaceButton.addEventListener("click", () => switchSpace("computer"));
 elements.homeButton.addEventListener("click", () => switchSpace("computer", state.computerHome || ""));
 elements.parentButton.addEventListener("click", navigateParent);
+elements.downloadFilesButton.addEventListener("click", downloadSelected);
 elements.copyFilesButton.addEventListener("click", () => setFileClipboard("copy"));
 elements.cutFilesButton.addEventListener("click", () => setFileClipboard("move"));
 elements.pasteFilesButton.addEventListener("click", pasteFiles);
