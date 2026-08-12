@@ -104,6 +104,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $exePath = Join-Path $OutputDirectory "CHFS.exe"
+$checksumPath = Join-Path $OutputDirectory "SHA256SUMS.txt"
+$exeHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+"$exeHash  CHFS.exe" | Set-Content -LiteralPath $checksumPath -Encoding ascii
 
 # Explorer 会按完整路径缓存 EXE 图标。重复覆盖桌面的 CHFS.exe 时，即使新图标
 # 已正确写入 PE 资源，也可能继续显示旧的 Python 图标；先清理图标缓存，再通过
@@ -132,3 +135,4 @@ catch {
     Write-Warning "The executable was built, but Explorer icon refresh failed: $($_.Exception.Message)"
 }
 Write-Host "Build completed: $exePath" -ForegroundColor Green
+Write-Host "SHA-256 manifest: $checksumPath" -ForegroundColor Green

@@ -6,6 +6,10 @@ CHFS（Convenient HTTP File Server）是一款面向局域网临时共享场景�
 
 > 当前版本包含内核、HTTP API、浏览器文件管理器和桌面服务端控制台。
 
+## 下载 Windows 版
+
+从 [GitHub Releases](https://github.com/Wangeme/CuteHttpFileSystem/releases/latest) 下载 `CHFS.exe` 和同一版本的 `SHA256SUMS.txt`。程序为便携式单文件，无需安装。当前发布文件尚未进行商业代码签名，Windows 可能显示信誉提示；请先核对 SHA-256，不要从第三方转载地址下载。详见 [Windows 下载与安全校验](docs/10-windows-download-security.md)。
+
 ## 已实现能力
 
 - 安全浏览共享目录，阻止 `..`、绝对路径及符号链接越界。
@@ -74,3 +78,5 @@ python -m unittest discover -s tests -v
 - [测试与性能报告](docs/06-test-report.md)
 - [界面设计验收](docs/07-design-qa.md)
 - [发布检查清单](docs/08-release-checklist.md)
+- [Windows 下载与安全校验](docs/10-windows-download-security.md)
+- [v0.3.3 发布说明](docs/releases/v0.3.3.md)

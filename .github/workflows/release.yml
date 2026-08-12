@@ -1,28 +1,25 @@
-name: 构建 Windows Release
+name: 验证 Windows 构建
 
 on:
-  # Pull Request 和手动运行只负责验证构建，不会创建 Release。
   pull_request:
   workflow_dispatch:
-  # 正式版本由维护者在本地构建并通过 gh release create 上传，避免标签推送
-  # 自动占用 GitHub Actions；这里仍保留手动构建和 PR 验证能力。
 
-# 创建 GitHub Release 和上传附件需要仓库内容写权限。
+# 正式版本按 docs/08-release-checklist.md 在维护者 Windows 环境构建并发布；
+# 此工作流只验证测试和打包，避免生成一个与本地验收版本不同的附件。
 permissions:
-  contents: write
+  contents: read
 
-# 同一个标签只允许一个发布任务运行，避免生成重复 Release。
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-release:
-    name: 测试、构建并发布
+  build:
+    name: 测试并构建
     runs-on: windows-latest
 
     steps:
-      - name: 检出标签对应的源码
+      - name: 检出源码
         uses: actions/checkout@v6
 
       - name: 安装 Python
@@ -43,21 +40,19 @@ jobs:
           $outputDirectory = Join-Path $env:GITHUB_WORKSPACE "dist"
           & "$env:GITHUB_WORKSPACE\scripts\build_exe.ps1" -OutputDirectory $outputDirectory
 
-      - name: 整理发布文件并生成 SHA-256
+      - name: 整理验证产物
         shell: pwsh
         run: |
           $distDirectory = Join-Path $env:GITHUB_WORKSPACE "dist"
           $sourceExe = Join-Path $distDirectory "CHFS.exe"
           $releaseExe = Join-Path $distDirectory "CHFS-Windows-x64.exe"
-          $checksumFile = Join-Path $distDirectory "SHA256SUMS.txt"
-
           if (-not (Test-Path -LiteralPath $sourceExe)) {
               throw "构建完成后没有找到 CHFS.exe"
           }
 
           Copy-Item -LiteralPath $sourceExe -Destination $releaseExe -Force
           $hash = (Get-FileHash -LiteralPath $releaseExe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  CHFS-Windows-x64.exe" | Set-Content -LiteralPath $checksumFile -Encoding ascii
+          "$hash  CHFS-Windows-x64.exe" | Set-Content -LiteralPath (Join-Path $distDirectory "SHA256SUMS.txt") -Encoding ascii
 
       - name: 保存构建产物
         uses: actions/upload-artifact@v6
@@ -67,23 +62,3 @@ jobs:
             dist/CHFS-Windows-x64.exe
             dist/SHA256SUMS.txt
           if-no-files-found: error
-
-      - name: 创建 Release 并上传程序
-        # Pull Request 和手动验证不会发布；只有 v* 标签触发时才执行。
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $distDirectory = Join-Path $env:GITHUB_WORKSPACE "dist"
-          $releaseExe = Join-Path $distDirectory "CHFS-Windows-x64.exe"
-          $checksumFile = Join-Path $distDirectory "SHA256SUMS.txt"
-
-          gh release create $tag `
-            $releaseExe `
-            $checksumFile `
-            --verify-tag `
-            --generate-notes `
-            --notes "修复：Web 端批量上传遇到同名文件时可选择覆盖或跳过，并可将选择应用到本批次后续冲突；未冲突文件会继续上传。改进：重复上传文件夹时复用已有目录。" `
-            --title "CHFS $tag"

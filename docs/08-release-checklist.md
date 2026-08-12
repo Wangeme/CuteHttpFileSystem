@@ -1,21 +1,31 @@
-# v0.1.0 发布检查清单
+# Windows 正式发布检查清单
 
-## 已通过
+正式 Release 使用维护者 Windows 环境中已经启动验收过的同一个 EXE；GitHub Actions 只负责独立验证测试与打包，避免上传与本机验收文件不同的二进制。
 
-- [x] 需求、架构、威胁模型、API 和用户指南已基线化。
-- [x] 38 项自动化回归测试通过。
-- [x] 256 MiB 真实 HTTP 上传、下载、SHA-256 和 Range 基准通过。
-- [x] 浏览器 SHA-256 回退实现通过四组标准库对照向量。
-- [x] 桌面 GUI 完成同屏设计验收，无 P0/P1/P2 视觉问题。
-- [x] `config.example.json` 通过启动前配置校验。
-- [x] Python 源码通过 `compileall`。
-- [x] `chfs-0.1.0-py3-none-any.whl` 构建成功，确认包含 HTML、CSS、`app.js` 和 `sha256.js`。
+## 发布前
 
-## 正式发布前需在目标环境执行
+- [ ] `main` 已拉取到与 `origin/main` 一致，工作区没有意外修改。
+- [ ] `pyproject.toml` 与 `src/chfs/__init__.py` 的版本号一致。
+- [ ] `python -m unittest discover -s tests -v` 全部通过。
+- [ ] `python -m compileall -q src tests` 通过。
+- [ ] 使用 `scripts\build_exe.cmd` 构建，不手工拼接 PyInstaller 参数。
+- [ ] 桌面的 `CHFS.exe` 可以启动，健康接口返回本次版本号。
+- [ ] 浏览器完成上传、下载、共享文本和文件夹打包下载冒烟测试。
+- [ ] `SHA256SUMS.txt` 与桌面 `CHFS.exe` 的 SHA-256 一致。
 
-- [ ] 用目标局域网的服务端、交换机/Wi-Fi 和至少一台客户端复测实际吞吐。
-- [ ] 用手机窄屏浏览器走一遍浏览、上传、续传、下载和删除主流程。
-- [ ] 若使用 HTTPS，以正式证书完成握手和多设备信任验证。
-- [ ] 按实际网络边界配置 Windows 防火墙，并确认未暴露到公网。
+## 发布
 
-这些项目依赖实际部署环境，不影响内核与开发包完成度，但属于正式对外发布的必要质量门。
+- [ ] 提交版本号、发布说明和相关文档并推送 `main`。
+- [ ] 在发布提交上创建注释标签（例如 `v0.3.3`）并推送。
+- [ ] 使用 `gh release create` 上传桌面的 `CHFS.exe` 与 `SHA256SUMS.txt`。
+- [ ] 打开 Release 页面，确认标题、说明、标签和两个附件完整。
+- [ ] 下载 Release 附件后再次比对 SHA-256。
+
+## v0.3.3 验收记录
+
+- [x] 68 项自动化测试通过，2 项按当前环境跳过。
+- [x] 文件夹和多选项目采用 ZIP64 流式打包，不产生等体积临时压缩包。
+- [x] 构建脚本固定 PyInstaller 版本并禁用 UPX。
+- [x] 构建脚本自动生成 `SHA256SUMS.txt`。
+
+局域网吞吐、手机浏览器兼容性、HTTPS 证书和防火墙边界仍应在实际部署环境复测。
