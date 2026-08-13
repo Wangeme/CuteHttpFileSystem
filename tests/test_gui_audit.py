@@ -42,6 +42,13 @@ class AuditDisplayTests(unittest.TestCase):
             "复制文件 · [共享目录] 源：资料/a.txt；资料/b.txt → 目标：备份",
         )
 
+    def test_reordered_visible_columns_keep_hidden_column_position(self) -> None:
+        order = CHFSApplication._merge_log_column_order(
+            ["time", "actor", "action", "ip", "mac", "result"],
+            ["action", "time", "ip", "mac", "result"],
+        )
+        self.assertEqual(order, ["action", "actor", "time", "ip", "mac", "result"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,7 +32,7 @@ if os.name == "nt":
             pass
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 from .. import __version__
 from ..config import AppConfig, default_config_path, default_share_root
@@ -74,6 +74,19 @@ class CHFSApplication(tk.Tk):
         self._pending_config_restart = False
         self._restart_stop_requested = False
         self._closing = False
+        # 审计表布局在页面切换期间保留；程序重新启动时回到整齐、可预期的默认值。
+        self._log_columns = ("time", "actor", "action", "ip", "mac", "result")
+        self._log_column_order = list(self._log_columns)
+        self._log_visible_columns = set(self._log_columns)
+        self._log_default_widths = {
+            "time": 140,
+            "actor": 90,
+            "action": 420,
+            "ip": 130,
+            "mac": 150,
+            "result": 70,
+        }
+        self._log_column_widths = dict(self._log_default_widths)
 
         self.title("CHFS · HTTP 文件传输服务器")
         self._window_icon = tk.PhotoImage(file=Path(__file__).with_name("chfs-icon.png"))
@@ -298,6 +311,7 @@ class CHFSApplication(tk.Tk):
         self.content.grid(row=0, column=1, sticky="nsew")
 
     def show_page(self, page: str) -> None:
+        self._remember_log_layout()
         if page != "overview" and getattr(self, "_shared_text_dirty", False):
             self._save_shared_text()
         self._active_page = page
@@ -540,7 +554,7 @@ class CHFSApplication(tk.Tk):
         recent_header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         ttk.Label(recent_header, text="最近操作", style="Surface.TLabel", font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
         ttk.Button(recent_header, text="刷新", width=6, style="Compact.TButton", command=self._load_overview_logs).pack(side="right")
-        columns = ("time", "actor", "action", "ip", "mac", "result")
+        columns = self._log_columns
         self.overview_log_tree = ttk.Treeview(
             recent,
             columns=columns,
@@ -930,7 +944,10 @@ class CHFSApplication(tk.Tk):
         self._action_bar()
 
     def _build_logs(self) -> None:
-        self._page_header("审计日志", "操作日志与审计日志是同一份记录，包含来源设备和操作结果")
+        self._page_header(
+            "审计日志",
+            "拖动表头换列，拖动边界调宽；双击表头排序，双击边界自适应；右键表头选择显示列",
+        )
         toolbar = ttk.Frame(self.content)
         toolbar.pack(fill="x", pady=(0, 12))
         ttk.Button(toolbar, text="刷新", style="Secondary.TButton", command=self._load_logs).pack(side="left")
@@ -960,11 +977,20 @@ class CHFSApplication(tk.Tk):
         self._log_drag_column: str | None = None
         self._log_drag_start_x = 0
         self._log_drag_moved = False
-        widths = {"time": 146, "actor": 62, "action": 238, "ip": 116, "mac": 138, "result": 58}
-        min_widths = {"time": 48, "actor": 32, "action": 24, "ip": 48, "mac": 48, "result": 32}
+        anchors = {"time": "center", "actor": "w", "action": "w", "ip": "center", "mac": "center", "result": "center"}
+        min_widths = {"time": 48, "actor": 32, "action": 40, "ip": 48, "mac": 48, "result": 32}
         for name in columns:
-            self.log_tree.heading(name, text=headings[name])
-            self.log_tree.column(name, width=widths[name], minwidth=min_widths[name], stretch=False)
+            self.log_tree.heading(name, text=headings[name], anchor="center")
+            self.log_tree.column(
+                name,
+                width=self._log_column_widths[name],
+                minwidth=min_widths[name],
+                anchor=anchors[name],
+                stretch=name == "action",
+            )
+        self.log_tree["displaycolumns"] = tuple(
+            name for name in self._log_column_order if name in self._log_visible_columns
+        )
         vertical_scrollbar = ttk.Scrollbar(holder, orient="vertical", command=self.log_tree.yview)
         horizontal_scrollbar = ttk.Scrollbar(holder, orient="horizontal", command=self.log_tree.xview)
         self.log_tree.configure(
@@ -977,6 +1003,9 @@ class CHFSApplication(tk.Tk):
         self.log_tree.bind("<ButtonPress-1>", self._on_log_header_press)
         self.log_tree.bind("<B1-Motion>", self._on_log_header_drag)
         self.log_tree.bind("<ButtonRelease-1>", self._on_log_header_release)
+        self.log_tree.bind("<Double-Button-1>", self._on_log_header_double_click)
+        self.log_tree.bind("<Button-3>", self._show_log_column_menu)
+        self._build_log_column_menu()
         self._load_logs()
 
     def _field_label(self, parent: tk.Misc, title: str, help_text: str, *, row: int | None = None, column: int = 0) -> None:
@@ -1358,6 +1387,122 @@ class CHFSApplication(tk.Tk):
         self.log_tree.heading(column, text=f"{self.log_headings[column]} {'▼' if reverse else '▲'}")
         self.log_sort_reverse[column] = not reverse
 
+    def _remember_log_layout(self) -> None:
+        """页面销毁前保存本次运行中的列宽、顺序和可见状态。"""
+
+        tree = getattr(self, "log_tree", None)
+        if tree is None:
+            return
+        try:
+            if not tree.winfo_exists():
+                return
+            for name in self._log_columns:
+                self._log_column_widths[name] = int(tree.column(name, "width"))
+            self._log_visible_columns = set(self._log_display_columns())
+        except tk.TclError:
+            # 页面切换和窗口关闭期间控件可能已被 Tk 销毁，无需阻断导航。
+            return
+
+    def _build_log_column_menu(self) -> None:
+        """创建类似资源管理器的表头列选择菜单。"""
+
+        self._log_column_menu = tk.Menu(self, tearoff=False)
+        self._log_column_menu_vars: dict[str, tk.BooleanVar] = {}
+        for name in self._log_columns:
+            variable = tk.BooleanVar(value=name in self._log_visible_columns)
+            self._log_column_menu_vars[name] = variable
+            self._log_column_menu.add_checkbutton(
+                label=self.log_headings[name],
+                variable=variable,
+                command=lambda column=name: self._toggle_log_column(column),
+            )
+        self._log_column_menu.add_separator()
+        self._log_column_menu.add_command(label="显示所有列", command=self._show_all_log_columns)
+        self._log_column_menu.add_command(label="恢复默认布局", command=self._reset_log_layout)
+
+    def _show_log_column_menu(self, event: tk.Event[tk.Misc]) -> str | None:
+        """右键表头时显示列的隐藏、恢复和重置选项。"""
+
+        if self.log_tree.identify_region(event.x, event.y) not in {"heading", "separator"}:
+            return None
+        try:
+            self._log_column_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._log_column_menu.grab_release()
+        return "break"
+
+    def _toggle_log_column(self, column: str) -> None:
+        """切换一列的可见性，但始终至少保留一列。"""
+
+        visible = self._log_column_menu_vars[column].get()
+        if visible:
+            self._log_visible_columns.add(column)
+        elif len(self._log_visible_columns) > 1:
+            self._log_visible_columns.discard(column)
+        else:
+            self._log_column_menu_vars[column].set(True)
+        self._apply_log_display_columns()
+
+    def _show_all_log_columns(self) -> None:
+        self._log_visible_columns = set(self._log_columns)
+        for variable in self._log_column_menu_vars.values():
+            variable.set(True)
+        self._apply_log_display_columns()
+
+    def _reset_log_layout(self) -> None:
+        """恢复默认列顺序、列宽和可见状态。"""
+
+        self._log_column_order = list(self._log_columns)
+        self._log_visible_columns = set(self._log_columns)
+        self._log_column_widths = dict(self._log_default_widths)
+        for name, width in self._log_default_widths.items():
+            self.log_tree.column(name, width=width)
+            self._log_column_menu_vars[name].set(True)
+        self._apply_log_display_columns()
+
+    def _apply_log_display_columns(self) -> None:
+        self.log_tree["displaycolumns"] = tuple(
+            name for name in self._log_column_order if name in self._log_visible_columns
+        )
+
+    @staticmethod
+    def _merge_log_column_order(full_order: list[str], visible_order: list[str]) -> list[str]:
+        """更新可见列顺序，同时让隐藏列保留原来的相对插入位置。"""
+
+        visible_set = set(visible_order)
+        iterator = iter(visible_order)
+        return [next(iterator) if name in visible_set else name for name in full_order]
+
+    def _auto_size_log_column(self, column: str) -> None:
+        """按表头和当前已加载内容自动计算列宽，行为类似双击资源管理器分隔线。"""
+
+        body_font = tkfont.Font(root=self, font=("Cascadia Mono", 8))
+        heading_font = tkfont.Font(root=self, font=("Microsoft YaHei UI", 8))
+        required = heading_font.measure(self.log_headings[column]) + 32
+        for item in self.log_tree.get_children():
+            required = max(required, body_font.measure(self.log_tree.set(item, column)) + 24)
+        minimum = int(self.log_tree.column(column, "minwidth"))
+        width = min(800, max(minimum, required))
+        self.log_tree.column(column, width=width)
+        self._log_column_widths[column] = width
+
+    def _on_log_header_double_click(self, event: tk.Event[tk.Misc]) -> str | None:
+        """双击表头排序；双击列边界则按内容自动调整宽度。"""
+
+        region = self.log_tree.identify_region(event.x, event.y)
+        if region not in {"heading", "separator"}:
+            return None
+        try:
+            index = int(self.log_tree.identify_column(event.x).removeprefix("#")) - 1
+            column = self._log_display_columns()[index]
+        except (ValueError, IndexError):
+            return None
+        if region == "separator":
+            self._auto_size_log_column(column)
+        else:
+            self._sort_log_column(column)
+        return "break"
+
     def _log_display_columns(self) -> list[str]:
         """返回当前可见列顺序，供表头拖放逻辑使用。"""
 
@@ -1399,20 +1544,18 @@ class CHFSApplication(tk.Tk):
         except (ValueError, IndexError):
             return None
         self.log_tree["displaycolumns"] = tuple(columns)
+        self._log_column_order = self._merge_log_column_order(self._log_column_order, columns)
         self._log_drag_moved = True
         return "break"
 
     def _on_log_header_release(self, event: tk.Event[tk.Misc]) -> str | None:
-        """短按表头排序；拖动表头时只改变列顺序。"""
+        """完成表头拖动；排序由双击表头单独触发。"""
 
         column = self._log_drag_column
-        dragged = self._log_drag_moved
         self._log_drag_column = None
         self._log_drag_moved = False
         if column is None:
             return None
-        if not dragged and self.log_tree.identify_region(event.x, event.y) == "heading":
-            self._sort_log_column(column)
         return "break"
 
     def _sort_overview_log_column(self, column: str) -> None:
