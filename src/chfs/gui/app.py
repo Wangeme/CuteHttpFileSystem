@@ -1522,6 +1522,8 @@ class CHFSApplication(tk.Tk):
 
     @staticmethod
     def _audit_action_text(event: dict[str, object]) -> str:
+        """生成审计表中的完整操作说明，不省略多路径和目标目录。"""
+
         action_names = {
             "session.login": "账户登录",
             "session.logout": "退出登录",
@@ -1529,7 +1531,10 @@ class CHFSApplication(tk.Tk):
             "upload.cancel": "取消上传",
             "file.upload": "上传文件",
             "file.download": "下载文件",
+            "archive.download": "打包下载",
             "file.delete": "删除文件",
+            "file.copy": "复制文件",
+            "file.move": "移动文件",
             "directory.create": "新建文件夹",
             "shared_text.update": "更新共享文本",
             "network.reject": "拒绝网络访问",
@@ -1537,8 +1542,31 @@ class CHFSApplication(tk.Tk):
         raw_action = str(event.get("action", "-") or "-")
         action = action_names.get(raw_action, raw_action)
         details = event.get("details")
-        detail_path = details.get("path") if isinstance(details, dict) else None
-        return f"{action} · {detail_path}" if detail_path else action
+        if not isinstance(details, dict):
+            return action
+
+        space_names = {"shared": "共享目录", "computer": "此电脑"}
+        space = space_names.get(str(details.get("space", "")), "")
+        prefix = f"[{space}] " if space else ""
+
+        detail_path = details.get("path")
+        if isinstance(detail_path, str):
+            return f"{action} · {prefix}{detail_path or '/'}"
+
+        paths = details.get("paths")
+        if isinstance(paths, list):
+            visible_paths = [str(path) or "/" for path in paths]
+            return f"{action} · {prefix}{'；'.join(visible_paths)}"
+
+        sources = details.get("sources")
+        destination = details.get("destination")
+        if isinstance(sources, list) and isinstance(destination, str):
+            visible_sources = [str(path) or "/" for path in sources]
+            return (
+                f"{action} · {prefix}源：{'；'.join(visible_sources)}"
+                f" → 目标：{destination or '/'}"
+            )
+        return action
 
     def _audit_row_values(self, event: dict[str, object]) -> tuple[object, ...]:
         return (

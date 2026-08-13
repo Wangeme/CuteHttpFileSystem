@@ -301,12 +301,23 @@ class HttpIntegrationTests(unittest.TestCase):
 
         status, _, _ = self.request("DELETE", f"/api/v1/files?path={encoded_path}", token=token)
         self.assertEqual(status, 204)
-        actions = [json.loads(line)["action"] for line in (self.base / "audit.jsonl").read_text(encoding="utf-8").splitlines()]
+        events = [
+            json.loads(line)
+            for line in (self.base / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        actions = [event["action"] for event in events]
         self.assertIn("session.login", actions)
         self.assertIn("file.upload", actions)
         self.assertIn("file.download", actions)
         self.assertIn("archive.download", actions)
         self.assertIn("file.delete", actions)
+        details_by_action = {event["action"]: event["details"] for event in events}
+        self.assertEqual(details_by_action["file.upload"]["path"], "资料/你好.txt")
+        self.assertEqual(details_by_action["file.download"]["path"], "资料/你好.txt")
+        self.assertEqual(details_by_action["archive.download"]["paths"], ["资料"])
+        self.assertEqual(details_by_action["file.copy"]["sources"], ["资料/你好.txt"])
+        self.assertEqual(details_by_action["file.copy"]["destination"], "副本")
+        self.assertEqual(details_by_action["file.delete"]["path"], "资料/你好.txt")
 
     def test_encoded_path_traversal_is_rejected(self) -> None:
         status, body, _ = self.request("GET", "/api/v1/files?path=..%2Fsecret")

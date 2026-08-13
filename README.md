@@ -17,7 +17,7 @@ CHFS（Convenient HTTP File Server）是一款面向局域网临时共享场景�
 - 访客与账户两级权限，支持读、写、删除、管理四类权限。
 - PBKDF2 密码散列、随机不透明会话令牌、会话过期和主动退出。
 - IPv4/IPv6 CIDR 允许/拒绝规则，拒绝规则优先。
-- JSON Lines 审计日志，记录主体、来源地址、动作和结果。
+- JSON Lines 审计日志，记录主体、来源地址、动作、结果和文件操作的完整公开路径。
 - JSON 配置文件、命令行启动与配置检查。
 - 响应式浏览器文件管理器，默认免登录传输，支持拖放上传、上一级导航、批量选择、复制、剪切、粘贴与删除。
 - 可选账户受控模式；不配置账户时，其他局域网机器无需安装软件或登录。
@@ -79,4 +79,5 @@ python -m unittest discover -s tests -v
 - [界面设计验收](docs/07-design-qa.md)
 - [发布检查清单](docs/08-release-checklist.md)
 - [Windows 下载与安全校验](docs/10-windows-download-security.md)
+- [v0.3.4 发布说明](docs/releases/v0.3.4.md)
 - [v0.3.3 发布说明](docs/releases/v0.3.3.md)

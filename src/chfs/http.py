@@ -278,10 +278,12 @@ async def list_or_delete_files(request: Request) -> Response:
             {"space": space, "path": user_path.replace("\\", "/"), "entries": [item.as_dict() for item in entries]}
         )
     recursive = _boolean_query(request, "recursive", False)
+    # 删除完成后目标已不存在，因此应在操作前保存解析器规范化后的审计路径。
+    audit_path = files.resolver.relative(files.resolver.resolve(user_path))
     files.delete(principal, user_path, recursive=recursive)
     runtime.audit.record(
         "file.delete", actor=principal.name, source=_source(request), success=True,
-        space=space, path=user_path, recursive=recursive
+        space=space, path=audit_path, recursive=recursive
     )
     return Response(status_code=204)
 
@@ -304,7 +306,7 @@ async def content(request: Request) -> Response:
         path = files.open_download(principal, user_path)
         runtime.audit.record(
             "file.download", actor=principal.name, source=_source(request), success=True,
-            space=space, path=user_path
+            space=space, path=files.resolver.relative(path)
         )
         return TrackedFileResponse(
             path,
@@ -326,7 +328,7 @@ async def content(request: Request) -> Response:
     entry = await files.upload(principal, user_path, request.stream(), overwrite=overwrite)
     runtime.audit.record(
         "file.upload", actor=principal.name, source=_source(request), success=True,
-        space=space, path=user_path, size=entry.size
+        space=space, path=entry.path, size=entry.size
     )
     return JSONResponse(entry.as_dict(), status_code=201)
 
@@ -343,7 +345,7 @@ async def create_directory(request: Request) -> JSONResponse:
     entry = files.create_directory(principal, user_path)
     runtime.audit.record(
         "directory.create", actor=principal.name, source=_source(request), success=True,
-        space=space, path=user_path
+        space=space, path=entry.path
     )
     return JSONResponse(entry.as_dict(), status_code=201)
 
@@ -407,6 +409,9 @@ async def file_operations(request: Request) -> JSONResponse:
         raise InvalidPathError("sources 必须是非空路径数组")
     if not isinstance(destination, str):
         raise InvalidPathError("destination 必须是目录路径")
+    # 审计记录使用解析器生成的统一公开路径，消除反斜杠、冗余分隔符等差异。
+    audit_sources = [files.resolver.relative(files.resolver.resolve(item)) for item in sources]
+    audit_destination = files.resolver.relative(files.resolver.resolve(destination))
     entries = files.copy_or_move(
         principal,
         sources,
@@ -419,8 +424,8 @@ async def file_operations(request: Request) -> JSONResponse:
         source=_source(request),
         success=True,
         space=space,
-        sources=sources,
-        destination=destination,
+        sources=audit_sources,
+        destination=audit_destination,
     )
     return JSONResponse({"entries": [entry.as_dict() for entry in entries]})
 
@@ -505,7 +510,7 @@ async def create_resumable_upload(request: Request) -> JSONResponse:
         # 执行到这里说明创建成功。
         success=True,
         # 用户请求的目标路径。
-        path=user_path,
+        path=session.public_path,
         # 声明的文件总大小。
         size=expected_size,
         # 服务端当前已保存偏移；恢复上传时可能大于零。
@@ -528,10 +533,16 @@ async def upload_chunk(request: Request) -> Response:
     # 同一路由也承担取消上传功能，DELETE 不会继续进入分块接收逻辑。
     if request.method == "DELETE":
         # 删除临时文件及其内存会话。
-        uploads.cancel(principal, upload_id)
+        session = uploads.cancel(principal, upload_id)
         # 记录用户主动取消上传的审计事件。
         runtime.audit.record(
-            "upload.cancel", actor=principal.name, source=_source(request), success=True, upload_id=upload_id
+            "upload.cancel",
+            actor=principal.name,
+            source=_source(request),
+            success=True,
+            upload_id=upload_id,
+            space=space,
+            path=session.public_path,
         )
         # 204 表示取消成功且没有响应体。
         return Response(status_code=204)

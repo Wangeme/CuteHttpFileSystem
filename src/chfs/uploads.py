@@ -355,11 +355,14 @@ class ResumableUploadManager:
         # 同时返回文件条目、完整文件 SHA-256 和分块清单 SHA-256。
         return entry, session.full_hasher.hexdigest(), manifest
 
-    def cancel(self, principal: Principal, upload_id: str) -> None:
+    def cancel(self, principal: Principal, upload_id: str) -> UploadSession:
+        """取消上传并返回被取消的会话，供调用层完整记录目标路径。"""
+
         require(principal, Permission.WRITE)
         session = self._get(principal, upload_id)
         session.temporary.unlink(missing_ok=True)
         self._remove_session(session)
+        return session
 
     def status_dict(self, session: UploadSession) -> dict[str, object]:
         return {
