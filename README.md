@@ -22,6 +22,7 @@ CHFS（Convenient HTTP File Server）是一款面向局域网临时共享场景�
 - 响应式浏览器文件管理器，默认免登录传输，支持拖放上传、上一级导航、批量选择、复制、剪切、粘贴与删除。
 - 可选账户受控模式；不配置账户时，其他局域网机器无需安装软件或登录。
 - 原生桌面管理器，提供运行概览、共享、网络、账户、安全和日志页面。
+- 桌面概览的“最近操作”支持双击打开文件；右键可打开、复制本地路径或在文件资源管理器中定位。
 - 可选 HTTPS，证书与私钥在启动前成对校验。
 - 128 MiB Blob 分块断点续传，浏览器不再复制为 `ArrayBuffer`，网络闪断后可从服务端确认的偏移继续。
 - 分块请求体边接收边写入临时文件并在线程池增量哈希，不聚合完整请求体；失败请求自动截回已确认偏移。
@@ -79,6 +80,7 @@ python -m unittest discover -s tests -v
 - [界面设计验收](docs/07-design-qa.md)
 - [发布检查清单](docs/08-release-checklist.md)
 - [Windows 下载与安全校验](docs/10-windows-download-security.md)
+- [v0.3.8 发布说明](docs/releases/v0.3.8.md)
 - [v0.3.7 发布说明](docs/releases/v0.3.7.md)
 - [v0.3.6 发布说明](docs/releases/v0.3.6.md)
 - [v0.3.4 发布说明](docs/releases/v0.3.4.md)

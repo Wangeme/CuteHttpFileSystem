@@ -15,7 +15,7 @@ import subprocess
 import threading
 import webbrowser
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import qrcode
 
@@ -38,6 +38,7 @@ from .. import __version__
 from ..config import AppConfig, default_config_path, default_share_root
 from ..errors import CHFSError
 from ..models import Permission
+from ..paths import FullDiskPathResolver, SafePathResolver
 from ..security import Account, hash_password
 from .bandwidth_heartbeat import BandwidthHeartbeat
 from .controller import ServerController, discover_urls, group_access_urls
@@ -590,6 +591,15 @@ class CHFSApplication(tk.Tk):
         self.overview_log_tree.bind("<ButtonPress-1>", self._on_overview_log_header_press)
         self.overview_log_tree.bind("<B1-Motion>", self._on_overview_log_header_drag)
         self.overview_log_tree.bind("<ButtonRelease-1>", self._on_overview_log_header_release)
+        self.overview_log_tree.bind("<Double-Button-1>", self._on_overview_log_double_click)
+        self.overview_log_tree.bind("<Button-3>", self._show_overview_log_menu)
+        self._overview_log_menu = tk.Menu(self, tearoff=False)
+        self._overview_log_menu.add_command(label="打开", command=self._open_overview_log_path)
+        self._overview_log_menu.add_command(label="复制路径", command=self._copy_overview_log_paths)
+        self._overview_log_menu.add_command(
+            label="在文件资源管理器中打开",
+            command=self._reveal_overview_log_path,
+        )
         self._load_overview_logs()
 
     def _reflow_overview(self, event: tk.Event[tk.Misc]) -> None:
@@ -1638,12 +1648,169 @@ class CHFSApplication(tk.Tk):
             return
         for item in tree.get_children():
             tree.delete(item)
+        self._overview_log_events: dict[str, dict[str, object]] = {}
         events = self._read_audit_events(limit=None)
         if not events:
             tree.insert("", "end", values=("暂无记录", "-", "启动服务并执行文件操作后会显示在这里", "-", "-", "-"))
             return
         for event in events:
-            tree.insert("", "end", values=self._audit_row_values(event))
+            item = tree.insert("", "end", values=self._audit_row_values(event))
+            self._overview_log_events[item] = event
+
+    @staticmethod
+    def _audit_event_public_paths(event: dict[str, object]) -> tuple[str, tuple[str, ...]]:
+        """提取审计事件指向的文件空间与公开路径，复制/移动优先使用目标。"""
+
+        details = event.get("details")
+        if not isinstance(details, dict):
+            return "", ()
+        space = str(details.get("space", ""))
+        if space not in {"shared", "computer"}:
+            return "", ()
+
+        action = str(event.get("action", ""))
+        sources = details.get("sources")
+        destination = details.get("destination")
+        if action in {"file.copy", "file.move"} and isinstance(sources, list) and isinstance(destination, str):
+            target_paths: list[str] = []
+            target_directory = PurePosixPath(destination.replace("\\", "/"))
+            for source in sources:
+                if not isinstance(source, str):
+                    continue
+                name = PurePosixPath(source.replace("\\", "/")).name
+                if name:
+                    target_paths.append((target_directory / name).as_posix())
+            return space, tuple(dict.fromkeys(target_paths))
+
+        path = details.get("path")
+        if isinstance(path, str):
+            return space, (path,)
+        paths = details.get("paths")
+        if isinstance(paths, list):
+            return space, tuple(dict.fromkeys(path for path in paths if isinstance(path, str)))
+        if isinstance(sources, list):
+            return space, tuple(dict.fromkeys(path for path in sources if isinstance(path, str)))
+        return "", ()
+
+    def _overview_log_paths_for_item(self, item: str) -> list[Path]:
+        """把选中审计记录的公开路径安全解析为本机路径。"""
+
+        event = getattr(self, "_overview_log_events", {}).get(item)
+        if event is None:
+            return []
+        space, public_paths = self._audit_event_public_paths(event)
+        try:
+            resolver = (
+                SafePathResolver(self.config.share_root)
+                if space == "shared"
+                else FullDiskPathResolver()
+                if space == "computer"
+                else None
+            )
+        except (CHFSError, OSError):
+            return []
+        if resolver is None:
+            return []
+
+        resolved: list[Path] = []
+        for public_path in public_paths:
+            try:
+                path = resolver.resolve(public_path)
+            except (CHFSError, OSError):
+                continue
+            if path not in resolved:
+                resolved.append(path)
+        return resolved
+
+    def _selected_overview_log_paths(self) -> list[Path]:
+        tree = getattr(self, "overview_log_tree", None)
+        if tree is None or not tree.winfo_exists():
+            return []
+        selection = tree.selection()
+        item = selection[0] if selection else tree.focus()
+        return self._overview_log_paths_for_item(item) if item else []
+
+    def _show_overview_log_menu(self, event: tk.Event[tk.Misc]) -> str | None:
+        """在最近操作的文件记录上显示本机文件快捷操作。"""
+
+        if self.overview_log_tree.identify_region(event.x, event.y) not in {"cell", "tree"}:
+            return None
+        item = self.overview_log_tree.identify_row(event.y)
+        if not item:
+            return None
+        self.overview_log_tree.selection_set(item)
+        self.overview_log_tree.focus(item)
+        state = "normal" if self._overview_log_paths_for_item(item) else "disabled"
+        for label in ("打开", "复制路径", "在文件资源管理器中打开"):
+            self._overview_log_menu.entryconfigure(label, state=state)
+        try:
+            self._overview_log_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._overview_log_menu.grab_release()
+        return "break"
+
+    def _on_overview_log_double_click(self, event: tk.Event[tk.Misc]) -> str | None:
+        """双击最近操作中的文件记录时直接打开首个目标。"""
+
+        if self.overview_log_tree.identify_region(event.x, event.y) not in {"cell", "tree"}:
+            return None
+        item = self.overview_log_tree.identify_row(event.y)
+        if not item:
+            return None
+        self.overview_log_tree.selection_set(item)
+        self.overview_log_tree.focus(item)
+        if self._overview_log_paths_for_item(item):
+            self._open_overview_log_path()
+            return "break"
+        return None
+
+    def _open_overview_log_path(self) -> None:
+        paths = self._selected_overview_log_paths()
+        if not paths:
+            return
+        path = paths[0]
+        if not path.exists():
+            messagebox.showinfo("文件不存在", f"文件可能已被移动或删除：\n{path}")
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(path)
+            else:
+                webbrowser.open(path.as_uri())
+        except OSError as exc:
+            messagebox.showerror("无法打开", str(exc))
+
+    def _copy_overview_log_paths(self) -> None:
+        paths = self._selected_overview_log_paths()
+        if not paths:
+            return
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(str(path) for path in paths))
+        self.status_detail_var.set(f"已复制 {len(paths)} 个本地路径")
+
+    def _reveal_overview_log_path(self) -> None:
+        paths = self._selected_overview_log_paths()
+        if not paths:
+            return
+        path = paths[0]
+        try:
+            if os.name == "nt":
+                if path.is_file():
+                    subprocess.Popen(["explorer.exe", f"/select,{path}"])
+                else:
+                    directory = path if path.is_dir() else path.parent
+                    if not directory.exists():
+                        messagebox.showinfo("目录不存在", f"文件所在目录可能已被移动或删除：\n{directory}")
+                        return
+                    os.startfile(directory)
+            else:
+                directory = path if path.is_dir() else path.parent
+                if not directory.exists():
+                    messagebox.showinfo("目录不存在", f"文件所在目录可能已被移动或删除：\n{directory}")
+                    return
+                webbrowser.open(directory.as_uri())
+        except OSError as exc:
+            messagebox.showerror("无法打开文件资源管理器", str(exc))
 
     def _read_audit_events(self, *, limit: int | None) -> list[dict[str, object]]:
         """读取最近的结构化审计事件；损坏行不会影响其余日志展示。"""
