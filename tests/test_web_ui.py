@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 WEB_INDEX = Path(__file__).parents[1] / "src" / "chfs" / "web" / "index.html"
+WEB_APP = Path(__file__).parents[1] / "src" / "chfs" / "web" / "app.js"
 
 
 class SharedTextToolbarTests(unittest.TestCase):
@@ -23,6 +24,16 @@ class SharedTextToolbarTests(unittest.TestCase):
             self.assertIn("button", classes)
             self.assertIn("button-secondary", classes)
             self.assertNotIn("button-quiet", classes)
+
+    def test_clear_shared_text_does_not_request_confirmation(self) -> None:
+        javascript = WEB_APP.read_text(encoding="utf-8")
+        match = re.search(
+            r"function clearSharedText\(\) \{(?P<body>.*?)\n\}",
+            javascript,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        self.assertNotIn("window.confirm", match.group("body"))
 
 
 if __name__ == "__main__":

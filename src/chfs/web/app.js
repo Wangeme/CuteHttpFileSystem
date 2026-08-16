@@ -253,7 +253,6 @@ async function pasteSharedText() {
 }
 
 function clearSharedText() {
-  if (!window.confirm("确定清空共享文本吗？其他设备也会同步清空。")) return;
   elements.sharedText.value = "";
   markSharedTextDirty(0);
   elements.sharedText.focus();
