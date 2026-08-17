@@ -80,6 +80,7 @@ python -m unittest discover -s tests -v
 - [界面设计验收](docs/07-design-qa.md)
 - [发布检查清单](docs/08-release-checklist.md)
 - [Windows 下载与安全校验](docs/10-windows-download-security.md)
+- [v0.3.10 发布说明](docs/releases/v0.3.10.md)
 - [v0.3.9 发布说明](docs/releases/v0.3.9.md)
 - [v0.3.8 发布说明](docs/releases/v0.3.8.md)
 - [v0.3.7 发布说明](docs/releases/v0.3.7.md)

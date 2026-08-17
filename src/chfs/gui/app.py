@@ -805,8 +805,6 @@ class CHFSApplication(tk.Tk):
         widget = getattr(self, "shared_text_widget", None)
         if widget is None:
             return
-        if not messagebox.askyesno("清空共享文本？", "其他设备也会同步清空，确定继续吗？"):
-            return
         widget.delete("1.0", "end")
         widget.edit_modified(True)
         widget.focus_set()

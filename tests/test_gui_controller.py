@@ -6,10 +6,27 @@ import tempfile
 import unittest
 import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from chfs.config import AppConfig
+from chfs.gui.app import CHFSApplication
 from chfs.gui.controller import ServerController, discover_urls, group_access_urls
+
+
+class DesktopSharedTextTests(unittest.TestCase):
+    def test_clear_shared_text_does_not_request_confirmation(self) -> None:
+        """桌面端清空共享文本应立即执行，不再弹出二次确认框。"""
+
+        widget = MagicMock()
+        application = SimpleNamespace(shared_text_widget=widget)
+        with patch("chfs.gui.app.messagebox.askyesno") as confirmation:
+            CHFSApplication._clear_shared_text(application)
+
+        confirmation.assert_not_called()
+        widget.delete.assert_called_once_with("1.0", "end")
+        widget.edit_modified.assert_called_once_with(True)
+        widget.focus_set.assert_called_once_with()
 
 
 class ServerControllerTests(unittest.TestCase):
