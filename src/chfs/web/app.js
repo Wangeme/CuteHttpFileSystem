@@ -258,6 +258,30 @@ function clearSharedText() {
   elements.sharedText.focus();
 }
 
+function filesFromPasteEvent(event) {
+  // ClipboardEvent.files 是 Chromium/Edge 粘贴本地文件时最直接的数据源。
+  const directFiles = [...(event.clipboardData?.files || [])];
+  if (directFiles.length) return directFiles;
+
+  // 某些浏览器只在 DataTransferItemList 中暴露文件，因此再做一次兼容读取。
+  return [...(event.clipboardData?.items || [])]
+    .filter(item => item.kind === "file")
+    .map(item => item.getAsFile())
+    .filter(file => file !== null);
+}
+
+async function pasteFilesIntoSharedText(event) {
+  const files = filesFromPasteEvent(event);
+  // 普通文本粘贴不做干预，浏览器会修改 textarea，随后由 input 事件自动保存。
+  if (!files.length) return;
+
+  // 文件不应以文件名或不可见对象写入共享文本区；改由现有上传流程处理。
+  event.preventDefault();
+  const context = { space: state.space, path: state.path };
+  toast(`检测到 ${files.length} 个文件，开始上传`);
+  await uploadFiles(files, file => file.name, context);
+}
+
 function markSharedTextDirty(delay = 600) {
   state.sharedTextDirty = true;
   state.sharedTextEditVersion += 1;
@@ -1074,6 +1098,7 @@ document.querySelector("#refreshButton").addEventListener("click", loadFiles);
 elements.sharedText.addEventListener("input", () => {
   markSharedTextDirty();
 });
+elements.sharedText.addEventListener("paste", pasteFilesIntoSharedText);
 elements.sharedText.addEventListener("keydown", event => {
   if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
     event.preventDefault();

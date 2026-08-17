@@ -35,6 +35,25 @@ class SharedTextToolbarTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertNotIn("window.confirm", match.group("body"))
 
+    def test_pasting_files_in_shared_text_uses_existing_upload_flow(self) -> None:
+        """文件粘贴应阻止文本插入，并复用上传流程；纯文本粘贴仍交给浏览器。"""
+        javascript = WEB_APP.read_text(encoding="utf-8")
+        match = re.search(
+            r"async function pasteFilesIntoSharedText\(event\) \{(?P<body>.*?)\n\}",
+            javascript,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        body = match.group("body")
+        self.assertIn("filesFromPasteEvent(event)", body)
+        self.assertIn("if (!files.length) return", body)
+        self.assertIn("event.preventDefault()", body)
+        self.assertIn("await uploadFiles(files", body)
+        self.assertIn(
+            'elements.sharedText.addEventListener("paste", pasteFilesIntoSharedText)',
+            javascript,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
