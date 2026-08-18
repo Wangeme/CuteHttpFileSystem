@@ -248,6 +248,8 @@ class CHFSApplication(tk.Tk):
         style.configure("Danger.TButton", background="#4a2230", foreground="#fecdd3", padding=(14, 9), borderwidth=0)
         style.map("Danger.TButton", background=[("active", "#6b293b")])
         style.configure("TEntry", padding=9, insertcolor=TEXT)
+        # 概览卡片空间较紧，端口编辑框使用紧凑样式，但仍保留清晰的输入边界。
+        style.configure("OverviewPort.TEntry", padding=(7, 3), insertcolor=TEXT, font=("Cascadia Mono", 9))
         style.configure("TCombobox", padding=8)
         style.configure("TCheckbutton", background=BG, foreground=TEXT)
         style.map("TCheckbutton", background=[("active", BG)])
@@ -530,12 +532,24 @@ class CHFSApplication(tk.Tk):
             row = ttk.Frame(service, style="FlatSurface.TFrame")
             row.pack(fill="x", pady=1)
             ttk.Label(row, text=label, style="CardTitle.TLabel", width=10).pack(side="left")
-            ttk.Label(
-                row,
-                text=value,
-                style="Surface.TLabel",
-                font=("Cascadia Mono", 9) if label in {"监听端口", "账户"} else ("Microsoft YaHei UI", 9),
-            ).pack(side="left", fill="x", expand=True)
+            if label == "监听端口":
+                # 与“网络与访问”页共用 port_var；输入停止后会走既有校验、原子保存
+                # 和运行中安全重启流程，不在概览页复制第二套配置逻辑。
+                self._overview_port_entry = ttk.Entry(
+                    row,
+                    textvariable=self.port_var,
+                    width=9,
+                    justify="center",
+                    style="OverviewPort.TEntry",
+                )
+                self._overview_port_entry.pack(side="left")
+            else:
+                ttk.Label(
+                    row,
+                    text=value,
+                    style="Surface.TLabel",
+                    font=("Cascadia Mono", 9) if label == "账户" else ("Microsoft YaHei UI", 9),
+                ).pack(side="left", fill="x", expand=True)
             if index < len(service_rows) - 1:
                 ttk.Separator(service, orient="horizontal").pack(fill="x")
 

@@ -68,6 +68,18 @@ class GUIAutoSaveTests(unittest.TestCase):
         self.assertEqual(AppConfig.load(self.config_path).port, port)
         self.assertIn("尚未保存", self.app.auto_save_status_var.get())
 
+    def test_overview_port_editor_updates_the_shared_port_variable(self) -> None:
+        """运行概览中的端口框应直接进入现有自动保存链路。"""
+
+        port = _free_port()
+        editor = self.app._overview_port_entry
+        editor.delete(0, "end")
+        editor.insert(0, str(port))
+
+        self.assertEqual(self.app.port_var.get(), str(port))
+        self.assertTrue(self._pump_events(2.0, self.config_path.exists))
+        self.assertEqual(AppConfig.load(self.config_path).port, port)
+
     def test_running_service_restarts_once_with_latest_saved_port(self) -> None:
         first_port = _free_port()
         second_port = _free_port()
